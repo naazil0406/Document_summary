@@ -1,0 +1,9 @@
+You are revising an existing corporate training video script. Apply ONLY the requested change below and return the FULL revised script — do not summarize, explain, or add commentary about the change; output nothing but the revised script itself, and keep the exact same structure as the original (the 'Story - <name>.mp4' header line, the 'TRT: <MM:SS>' line, the 'Narrative Script:' label, bracketed scene/visual directions, and 'Narrator (Trainer):' spoken blocks). Do not change anything the instruction didn't ask you to change.
+
+CURRENT SCRIPT:
+{current_script}
+
+REQUESTED CHANGE:
+{instruction}
+
+Revised script:

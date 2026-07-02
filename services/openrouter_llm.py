@@ -1,10 +1,8 @@
-import json
 import logging
 import os
 import random
 import re
 from typing import List
-
 import requests
 
 logger = logging.getLogger(__name__)
@@ -16,68 +14,34 @@ FALLBACK_ANSWER = (
 )
 
 # ---------------------------------------------------------------------------
-# Main Q&A prompt — used by the query flow
-# ---------------------------------------------------------------------------
-PROMPT_TEMPLATE = """\
-You are a precise document assistant. Answer questions strictly from the \
-context below — never invent or infer facts not present in the context.
-
-Context:
-{retrieved_chunks}
-
-Question:
-{user_question}
-
-Instructions:
-* Answer ONLY using the provided context.
-* Answer the question directly and concisely using only the provided context.
-* Do not invent, infer, or add information that is not present in the context.
-* Do not use section headings, bullets, numbered lists, labels, or extra titles.
-* Preserve important facts, dates, names, numbers, and findings exactly as they appear in the context.
-
-
-Answer:"""
-
-# ---------------------------------------------------------------------------
-# Summarisation prompt — used by the summarize flow (more context, richer output)
-# ---------------------------------------------------------------------------
-SUMMARY_PROMPT_TEMPLATE = """\
-You are a clear and concise document analyst. Produce an easy-to-understand
-executive summary of the document excerpts below. Use ONLY the content provided
-— never invent or infer information not present in the excerpts.
-
-Document content:
-{retrieved_chunks}
-
-Task:
-Write a clear executive summary in plain language using exactly 2 paragraphs
-separated by a blank line. The total summary should be 10 to 15 sentences.
-Cover the key purpose, main topics, important ideas, and takeaways. Do not use
-section headings, bullet points, numbered lists, labels, or introductory titles.
-Keep the writing fluent, readable, and free of padding, repetition, or vague filler.
-
-Executive Summary:"""
-
-
-# ---------------------------------------------------------------------------
-# Presentation / narration script prompt — fixed standard format, but the
-# template TEXT itself is NOT hardcoded here. It lives in
-# prompts/presentation_prompt.json so it can be edited without touching code.
+# Prompts are NOT hardcoded in this file. Every prompt template used below
+# (Q&A, summarisation, presentation/narration script, per-batch extraction,
+# and script-editing) lives as its own JSON file in the prompts/ directory so
+# it can be edited without touching code. See _load_prompt_template() below.
 #
-# This is a story-driven, scene-scripted training video narration (opening
-# scene, "Narrator (Trainer):" spoken blocks, an illustrative real-life-style
-# incident, a concept break-down, a closing reflection prompt) rather than a
-# slide-deck outline. The SHAPE of the script is fixed — it is never derived
-# from an uploaded Word document. The illustrative STORY inside it, however,
-# must be freshly invented every time (different character, workplace, and
-# incident) rather than pulled from the training documents themselves.
+# The presentation prompt is a story-driven, scene-scripted training video
+# narration (opening scene, "Narrator (Trainer):" spoken blocks, an
+# illustrative real-life-style incident, a concept break-down, a closing
+# reflection prompt) rather than a slide-deck outline. The SHAPE of the
+# script is fixed — it is never derived from an uploaded Word document. The
+# illustrative STORY inside it, however, must be freshly invented every time
+# (different character, workplace, and incident) rather than pulled from the
+# training documents themselves.
 # ---------------------------------------------------------------------------
 _PROMPTS_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "prompts"
 )
+_QA_PROMPT_PATH = os.path.join(_PROMPTS_DIR, "qa_prompt.txt")
+_SUMMARY_PROMPT_PATH = os.path.join(_PROMPTS_DIR, "summary_prompt.txt")
+_BATCH_EXTRACTION_PROMPT_PATH = os.path.join(
+    _PROMPTS_DIR, "batch_extraction_prompt.txt"
+)
+_EDIT_PRESENTATION_PROMPT_PATH = os.path.join(
+    _PROMPTS_DIR, "edit_presentation_prompt.txt"
+)
 _PRESENTATION_PROMPT_PATH = os.getenv(
     "PRESENTATION_PROMPT_PATH",
-    os.path.join(_PROMPTS_DIR, "presentation_prompt.json"),
+    os.path.join(_PROMPTS_DIR, "presentation_prompt.txt"),
 )
 
 # Seed pool used to force a different illustrative character/workplace into
@@ -103,32 +67,45 @@ _SEED_WORKPLACES = [
 ]
 
 
-def _load_presentation_prompt_template() -> str:
-    """Load the presentation prompt template from prompts/presentation_prompt.json.
+def _load_prompt_template(path: str) -> str:
+    """Load a prompt template from a plain .txt file in the prompts/ directory.
 
-    Raised errors are intentionally not swallowed — the template is no longer
-    hardcoded in this file, so a missing/broken JSON file should fail loudly
+    Raised errors are intentionally not swallowed — prompts are no longer
+    hardcoded in this file, so a missing/empty file should fail loudly
     rather than silently falling back to some other copy of the prompt.
     """
     try:
-        with open(_PRESENTATION_PROMPT_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        with open(path, "r", encoding="utf-8") as f:
+            template = f.read()
     except FileNotFoundError as exc:
         raise RuntimeError(
-            f"Presentation prompt template not found at '{_PRESENTATION_PROMPT_PATH}'. "
-            "Edit prompts/presentation_prompt.json (or set PRESENTATION_PROMPT_PATH)."
-        ) from exc
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(
-            f"Presentation prompt template at '{_PRESENTATION_PROMPT_PATH}' is not valid JSON: {exc}"
+            f"Prompt template not found at '{path}'. "
+            f"Edit that file in the prompts/ directory (or check the relevant *_PATH env var)."
         ) from exc
 
-    template = data.get("presentation_prompt")
     if not template or not template.strip():
-        raise RuntimeError(
-            f"'{_PRESENTATION_PROMPT_PATH}' is missing a non-empty 'presentation_prompt' field."
-        )
+        raise RuntimeError(f"'{path}' is empty.")
     return template
+
+
+def _load_qa_prompt_template() -> str:
+    return _load_prompt_template(_QA_PROMPT_PATH)
+
+
+def _load_summary_prompt_template() -> str:
+    return _load_prompt_template(_SUMMARY_PROMPT_PATH)
+
+
+def _load_batch_extraction_prompt_template() -> str:
+    return _load_prompt_template(_BATCH_EXTRACTION_PROMPT_PATH)
+
+
+def _load_edit_presentation_prompt_template() -> str:
+    return _load_prompt_template(_EDIT_PRESENTATION_PROMPT_PATH)
+
+
+def _load_presentation_prompt_template() -> str:
+    return _load_prompt_template(_PRESENTATION_PROMPT_PATH)
 
 
 def _random_story_seed() -> tuple[str, str]:
@@ -196,13 +173,15 @@ class OpenRouterLLMService:
         return "\n\n---\n\n".join(formatted)
 
     def build_prompt(self, chunks: List[dict], question: str) -> str:
-        return PROMPT_TEMPLATE.format(
+        template = _load_qa_prompt_template()
+        return template.format(
             retrieved_chunks=self._format_context(chunks),
             user_question=question,
         )
 
     def build_summary_prompt(self, chunks: List[dict]) -> str:
-        return SUMMARY_PROMPT_TEMPLATE.format(
+        template = _load_summary_prompt_template()
+        return template.format(
             retrieved_chunks=self._format_context(chunks),
         )
 
@@ -281,19 +260,10 @@ class OpenRouterLLMService:
         change and preserves the fixed script format — it does not
         regenerate a new story or invent a new seed.
         """
-        prompt = (
-            "You are revising an existing corporate training video script. "
-            "Apply ONLY the requested change below and return the FULL "
-            "revised script — do not summarize, explain, or add commentary "
-            "about the change; output nothing but the revised script "
-            "itself, and keep the exact same structure as the original "
-            "(the 'Story - <name>.mp4' header line, the 'TRT: <MM:SS>' "
-            "line, the 'Narrative Script:' label, bracketed scene/visual "
-            "directions, and 'Narrator (Trainer):' spoken blocks). Do not "
-            "change anything the instruction didn't ask you to change.\n\n"
-            f"CURRENT SCRIPT:\n{current_script}\n\n"
-            f"REQUESTED CHANGE:\n{instruction}\n\n"
-            "Revised script:"
+        template = _load_edit_presentation_prompt_template()
+        prompt = template.format(
+            current_script=current_script,
+            instruction=instruction,
         )
         return self._call_llm(prompt)
 
@@ -314,7 +284,7 @@ class OpenRouterLLMService:
     def generate_presentation(self, chunks: List[dict]) -> str:
         """Generate a full training script, batching chunks to avoid context limits.
 
-        The script's SHAPE is fixed (loaded from prompts/presentation_prompt.json)
+        The script's SHAPE is fixed (loaded from prompts/presentation_prompt.txt)
         and never derived from an uploaded document. The illustrative STORY inside
         it is freshly randomized on every call — a different character name and
         workplace are seeded in each time, and the prompt itself instructs the
@@ -333,14 +303,11 @@ class OpenRouterLLMService:
         logger.info("Presentation: %d batches detected, using batch strategy.", len(batches))
 
         batch_summaries = []
+        extraction_template = _load_batch_extraction_prompt_template()
         for i, batch in enumerate(batches, 1):
             logger.info("Summarizing batch %d/%d for presentation.", i, len(batches))
-            summary_prompt = (
-                "You are a document analyst. Extract and preserve ALL key information, "
-                "topics, procedures, safety rules, definitions, and examples from the "
-                "content below. Write in detailed bullet points. Do not omit anything "
-                "important. This output will be used to generate a corporate training script.\n\n"
-                f"Content:\n{self._format_context(batch)}\n\nDetailed extraction:"
+            summary_prompt = extraction_template.format(
+                retrieved_chunks=self._format_context(batch),
             )
             batch_summary = self._call_llm(summary_prompt)
             batch_summaries.append(f"=== Source Batch {i} ===\n{batch_summary}")

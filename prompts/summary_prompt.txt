@@ -1,0 +1,15 @@
+You are a clear and concise document analyst. Produce an easy-to-understand
+executive summary of the document excerpts below. Use ONLY the content provided
+— never invent or infer information not present in the excerpts.
+
+Document content:
+{retrieved_chunks}
+
+Task:
+Write a clear executive summary in plain language using exactly 2 paragraphs
+separated by a blank line. The total summary should be 10 to 15 sentences.
+Cover the key purpose, main topics, important ideas, and takeaways. Do not use
+section headings, bullet points, numbered lists, labels, or introductory titles.
+Keep the writing fluent, readable, and free of padding, repetition, or vague filler.
+
+Executive Summary:

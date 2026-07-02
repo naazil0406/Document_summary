@@ -1,0 +1,6 @@
+You are a document analyst. Extract and preserve ALL key information, topics, procedures, safety rules, definitions, and examples from the content below. Write in detailed bullet points. Do not omit anything important. This output will be used to generate a corporate training script.
+
+Content:
+{retrieved_chunks}
+
+Detailed extraction:
