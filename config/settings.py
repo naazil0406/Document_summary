@@ -1,0 +1,81 @@
+"""
+Configuration module for the RAG application.
+
+Loads environment variables (via python-dotenv) and exposes a single
+immutable `settings` object used across the application. Also configures
+application-wide logging.
+"""
+
+import os
+import logging
+from dataclasses import dataclass
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+def setup_logging(log_level: str = "INFO") -> None:
+    """Configure root logging for the entire application."""
+    logging.basicConfig(
+        level=getattr(logging, log_level.upper(), logging.INFO),
+        format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+
+@dataclass(frozen=True)
+class Settings:
+    # --- Paths ---
+    PDF_FOLDER: str = os.getenv("PDF_FOLDER", "data/pdfs")
+
+    # --- Chunking (Semantic Chunker config) ---
+    SEMANTIC_BUFFER_SIZE: int = int(os.getenv("SEMANTIC_BUFFER_SIZE", "1"))
+    SEMANTIC_BREAKPOINT_TYPE: str = os.getenv("SEMANTIC_BREAKPOINT_TYPE", "percentile")
+    SEMANTIC_BREAKPOINT_AMOUNT: float = float(os.getenv("SEMANTIC_BREAKPOINT_AMOUNT", "95"))
+    MAX_CHUNK_SIZE: int = int(os.getenv("MAX_CHUNK_SIZE", "1000"))
+    CHUNK_OVERLAP: int = int(os.getenv("CHUNK_OVERLAP", "100"))
+
+    # --- Document Chunking (Stage 1: headings / sections / paragraphs) ---
+    DOC_CHUNK_HEADING_MAX_LENGTH: int = int(os.getenv("DOC_CHUNK_HEADING_MAX_LENGTH", "80"))
+    DOC_CHUNK_MIN_PARAGRAPH_LENGTH: int = int(os.getenv("DOC_CHUNK_MIN_PARAGRAPH_LENGTH", "20"))
+
+    # --- Embeddings ---
+    EMBEDDING_MODEL_NAME: str = os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-m3")
+    EMBEDDING_DEVICE: str = os.getenv("EMBEDDING_DEVICE", "cpu")
+
+    # --- Qdrant ---
+    QDRANT_URL: str = os.getenv("QDRANT_URL", "http://localhost:6333")
+    QDRANT_API_KEY: str = os.getenv("QDRANT_API_KEY", "")
+    QDRANT_COLLECTION_NAME: str = os.getenv("QDRANT_COLLECTION_NAME", "company_docs")
+
+    # --- Retrieval ---
+    TOP_K: int = int(os.getenv("TOP_K", "40"))
+    TOP_K_SUMMARY: int = int(os.getenv("TOP_K_SUMMARY", "40"))
+    MIN_RELEVANCE_SCORE: float = float(os.getenv("MIN_RELEVANCE_SCORE", "0.40"))
+
+    # --- OpenRouter (Qwen 2.5 72B) ---
+    OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
+    OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", "qwen/qwen-2.5-72b-instruct")
+
+    # Q&A answers: 1024 tokens gives 4-5 solid lines without cutting off
+    OPENROUTER_MAX_TOKENS: int = int(os.getenv("OPENROUTER_MAX_TOKENS", "1024"))
+
+    OPENROUTER_TEMPERATURE: float = float(os.getenv("OPENROUTER_TEMPERATURE", "0.1"))
+    OPENROUTER_SITE_URL: str = os.getenv("OPENROUTER_SITE_URL", "")
+    OPENROUTER_SITE_NAME: str = os.getenv("OPENROUTER_SITE_NAME", "")
+
+    # Summaries: 2048 tokens gives room for 8-10 detailed lines + key points
+    SUMMARY_MAX_TOKENS: int = int(os.getenv("SUMMARY_MAX_TOKENS", "2048"))
+
+    # Training scripts: same model by default, but a much higher token cap
+    # since a full multi-section narration script is long-form output.
+    PRESENTATION_MODEL: str = os.getenv("PRESENTATION_MODEL", os.getenv("OPENROUTER_MODEL", "qwen/qwen-2.5-72b-instruct"))
+    PRESENTATION_MAX_TOKENS: int = int(os.getenv("PRESENTATION_MAX_TOKENS", "8192"))
+
+    # --- Logging ---
+    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+
+
+settings = Settings()
+setup_logging(settings.LOG_LEVEL)

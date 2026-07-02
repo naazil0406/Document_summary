@@ -1,0 +1,27 @@
+services:
+  # Qdrant — vector database. Runs as a persistent container.
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"   # REST API  (matches QDRANT_URL in .env)
+      - "6334:6334"   # gRPC API
+    volumes:
+      - ./qdrant_storage:/qdrant/storage
+
+  # Tesseract OCR — NOT a long-running service. services/pdf_parser.py
+  # launches a short-lived container per page via the Docker SDK
+  # (docker.from_env()), the same daemon Compose itself talks to.
+  # This entry exists only so the OCR image is declared in one place and
+  # can be pre-pulled with a single command before you ever run the app:
+  #
+  #   docker compose pull tesseract
+  #
+  # It is never "run" as a service — `profiles: ["tools"]` keeps it out of
+  # `docker compose up`.
+  tesseract:
+    image: tesseractshadow/tesseract4re
+    platform: linux/amd64
+    entrypoint: ["true"]
+    profiles: ["tools"]
