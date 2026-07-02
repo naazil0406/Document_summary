@@ -72,6 +72,9 @@ class Settings:
     # since a full multi-section narration script is long-form output.
     PRESENTATION_MODEL: str = os.getenv("PRESENTATION_MODEL", os.getenv("OPENROUTER_MODEL", "qwen/qwen-2.5-72b-instruct"))
     PRESENTATION_MAX_TOKENS: int = int(os.getenv("PRESENTATION_MAX_TOKENS", "8192"))
+    # Deliberately higher than OPENROUTER_TEMPERATURE (used for factual Q&A/summaries):
+    # the training-script story needs to vary run to run, not converge on one answer.
+    PRESENTATION_TEMPERATURE: float = float(os.getenv("PRESENTATION_TEMPERATURE", "0.9"))
 
     # --- Logging ---
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")

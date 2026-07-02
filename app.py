@@ -125,7 +125,7 @@ def get_presentation_llm() -> OpenRouterLLMService:
         api_key=settings.OPENROUTER_API_KEY,
         model=settings.PRESENTATION_MODEL,
         max_tokens=settings.PRESENTATION_MAX_TOKENS,
-        temperature=settings.OPENROUTER_TEMPERATURE,
+        temperature=settings.PRESENTATION_TEMPERATURE,
         site_url=settings.OPENROUTER_SITE_URL,
         site_name=settings.OPENROUTER_SITE_NAME,
     )
@@ -373,8 +373,6 @@ st.session_state.setdefault("summary_notice", None)
 st.session_state.setdefault("summary_cache", {})
 st.session_state.setdefault("presentation_text", None)
 st.session_state.setdefault("presentation_filename", None)
-# Cache: filename -> presentation script str
-st.session_state.setdefault("presentation_cache", {})
 
 os.makedirs(settings.PDF_FOLDER, exist_ok=True)
 
@@ -477,35 +475,29 @@ with st.sidebar:
         st.header("📋 Generate Training Script")
         st.caption(
             "Generates a cinematic, story-driven training video script from all "
-            "uploaded documents. The format is fixed — it is never derived from "
-            "an uploaded document."
+            "uploaded documents. The format is fixed; the story is freshly "
+            "invented every time you click — click again for a different one."
         )
 
         if st.button("Generate Training Script", use_container_width=True):
-            cache_key = "__all__"
-            if cache_key in st.session_state.presentation_cache:
-                st.session_state.presentation_text = st.session_state.presentation_cache[cache_key]
-                st.session_state.presentation_filename = "All Documents"
-            else:
-                qdrant_service = get_qdrant_service()
-                presentation_llm = get_presentation_llm()
-                try:
-                    with st.spinner("Gathering content from all documents..."):
-                        all_chunks = []
-                        for pdf in existing:
-                            chunks = _get_all_chunks(pdf, qdrant_service)
-                            if chunks:
-                                all_chunks.extend(chunks)
-                    if not all_chunks:
-                        st.error("No indexed content found. Please upload and process at least one document first.")
-                    else:
-                        with st.spinner(f"Generating training script from {len(existing)} document(s)... this may take a moment."):
-                            presentation_text = presentation_llm.generate_presentation(all_chunks)
-                        st.session_state.presentation_text = presentation_text
-                        st.session_state.presentation_filename = "All Documents"
-                        st.session_state.presentation_cache[cache_key] = presentation_text
-                except Exception as exc:
-                    st.error(f"Something went wrong while generating the training script: {exc}")
+            qdrant_service = get_qdrant_service()
+            presentation_llm = get_presentation_llm()
+            try:
+                with st.spinner("Gathering content from all documents..."):
+                    all_chunks = []
+                    for pdf in existing:
+                        chunks = _get_all_chunks(pdf, qdrant_service)
+                        if chunks:
+                            all_chunks.extend(chunks)
+                if not all_chunks:
+                    st.error("No indexed content found. Please upload and process at least one document first.")
+                else:
+                    with st.spinner(f"Generating training script from {len(existing)} document(s)... this may take a moment."):
+                        presentation_text = presentation_llm.generate_presentation(all_chunks)
+                    st.session_state.presentation_text = presentation_text
+                    st.session_state.presentation_filename = "All Documents"
+            except Exception as exc:
+                st.error(f"Something went wrong while generating the training script: {exc}")
 
     st.divider()
     if st.button("🗑️ Clear chat", use_container_width=True):
@@ -516,7 +508,6 @@ with st.sidebar:
         st.session_state.summary_cache = {}
         st.session_state.presentation_text = None
         st.session_state.presentation_filename = None
-        st.session_state.presentation_cache = {}
         st.rerun()
 
 

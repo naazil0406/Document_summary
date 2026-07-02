@@ -1,4 +1,7 @@
+import json
 import logging
+import os
+import random
 import re
 from typing import List
 
@@ -57,47 +60,82 @@ Executive Summary:"""
 
 
 # ---------------------------------------------------------------------------
-# Presentation / narration script prompt — fixed standard format.
+# Presentation / narration script prompt — fixed standard format, but the
+# template TEXT itself is NOT hardcoded here. It lives in
+# prompts/presentation_prompt.json so it can be edited without touching code.
 #
 # This is a story-driven, scene-scripted training video narration (opening
 # scene, "Narrator (Trainer):" spoken blocks, an illustrative real-life-style
 # incident, a concept break-down, a closing reflection prompt) rather than a
-# slide-deck outline. The format is fixed and built into the prompt — it is
-# NOT derived from an uploaded Word document.
+# slide-deck outline. The SHAPE of the script is fixed — it is never derived
+# from an uploaded Word document. The illustrative STORY inside it, however,
+# must be freshly invented every time (different character, workplace, and
+# incident) rather than pulled from the training documents themselves.
 # ---------------------------------------------------------------------------
-PRESENTATION_PROMPT_TEMPLATE = """\
-You are an expert corporate training scriptwriter who writes cinematic, story-driven narration scripts for internal training videos.
+_PROMPTS_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "prompts"
+)
+_PRESENTATION_PROMPT_PATH = os.getenv(
+    "PRESENTATION_PROMPT_PATH",
+    os.path.join(_PROMPTS_DIR, "presentation_prompt.json"),
+)
 
-TRAINING CONTENT (the only source of facts, terminology, statistics, and procedures below — never invent facts that contradict it, and never invent statistics that are not present in it):
-{retrieved_chunks}
+# Seed pool used to force a different illustrative character/workplace into
+# each generated script, so back-to-back runs don't converge on the same
+# story even at low sampling temperature.
+_SEED_FIRST_NAMES = [
+    "Maria", "David", "Aisha", "Wei", "Carlos", "Emily", "Tunde", "Sofia",
+    "James", "Priya", "Liam", "Noor", "Diego", "Grace", "Hiro", "Fatima",
+    "Marcus", "Elena", "Kwame", "Anya",
+]
+_SEED_LAST_NAMES = [
+    "Santos", "Bennett", "Khan", "Chen", "Ramirez", "Novak", "Adeyemi",
+    "Rossi", "Turner", "Patel", "O'Connor", "Haddad", "Silva", "Okafor",
+    "Tanaka", "Kowalski", "Nguyen", "Fischer", "Osei", "Bergstrom",
+]
+_SEED_WORKPLACES = [
+    "a food-processing plant", "a construction site", "a chemical warehouse",
+    "a hospital maintenance department", "an automotive assembly line",
+    "a logistics distribution center", "an oil refinery",
+    "a commercial kitchen", "a data-center facility", "a mining operation",
+    "a shipyard", "a pharmaceutical packaging plant", "a paper mill",
+    "an electrical substation", "a cold-storage facility",
+]
 
-====================================================
-REQUIRED SCRIPT FORMAT — follow this structure and style exactly
-====================================================
 
-Line 1 — a short header naming the story/segment, in this exact form:
-Story - <a short, memorable title or the illustrative character's name>.mp4
+def _load_presentation_prompt_template() -> str:
+    """Load the presentation prompt template from prompts/presentation_prompt.json.
 
-Line 2 — an estimated runtime for a video of this length, in this exact form:
-TRT: <MM:SS>
+    Raised errors are intentionally not swallowed — the template is no longer
+    hardcoded in this file, so a missing/broken JSON file should fail loudly
+    rather than silently falling back to some other copy of the prompt.
+    """
+    try:
+        with open(_PRESENTATION_PROMPT_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"Presentation prompt template not found at '{_PRESENTATION_PROMPT_PATH}'. "
+            "Edit prompts/presentation_prompt.json (or set PRESENTATION_PROMPT_PATH)."
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"Presentation prompt template at '{_PRESENTATION_PROMPT_PATH}' is not valid JSON: {exc}"
+        ) from exc
 
-Line 3 — the section label, on its own line:
-Narrative Script:
+    template = data.get("presentation_prompt")
+    if not template or not template.strip():
+        raise RuntimeError(
+            f"'{_PRESENTATION_PROMPT_PATH}' is missing a non-empty 'presentation_prompt' field."
+        )
+    return template
 
-Then the script body itself, written as a video narration script with:
 
-* Bracketed stage/visual directions such as [Opening Scene: ...] and [Visual: ...] at the opening, at key transitions, and at the close — describing what appears on screen, never spoken aloud.
-* "Narrator (Trainer):" on its own line before each spoken block, followed by the narration in quotation marks, written in a warm, conversational, first-person storytelling voice — as if a trainer is narrating a short film to a live audience.
-* Open with a short, vivid, illustrative scenario: invent a plausible named person and a specific, concrete workplace situation, and a specific incident or near-miss, that makes the training content's core concept concrete. The lesson, terminology, statistics, and facts embedded in the story must come from the TRAINING CONTENT — only the illustrative character and scene are invented.
-* After the story, include a short analytical "let's break this down" passage that names the underlying concept(s), definitions, or terminology the story illustrates, using the TRAINING CONTENT's own vocabulary and framework (its own named concepts, models, or terms — not generic safety language invented for this script).
-* Weave in real statistics, definitions, or procedures from the TRAINING CONTENT naturally, as the trainer explaining them mid-narration — never as a bullet list.
-* Close each major beat with a smooth spoken transition into the next idea, and include at least one further [Visual: ...] direction partway through (for example a checklist, diagram, or transition graphic that appears on screen).
-* End with a closing scene direction and a short reflective question posed directly to the audience, inviting them to share their own experience with the group.
-* Keep the tone engaging, natural, and human throughout. Do not use headings, bullet points, or numbered lists anywhere inside the narration body itself — the only structural markers are the bracketed scene/visual directions and the "Narrator (Trainer):" labels.
-
-Do not add any closing meta-commentary about the script itself (no summary paragraph explaining what the script does or how it aligns with the source material). End on the final scene direction or the discussion question — nothing after it.
-
-Training Script:"""
+def _random_story_seed() -> tuple[str, str]:
+    """Pick a random character name + workplace to seed a unique story."""
+    name = f"{random.choice(_SEED_FIRST_NAMES)} {random.choice(_SEED_LAST_NAMES)}"
+    workplace = random.choice(_SEED_WORKPLACES)
+    return name, workplace
 
 
 class OpenRouterLLMService:
@@ -225,13 +263,41 @@ class OpenRouterLLMService:
         result = self._call_llm(prompt)
         return self._normalize_summary(result)
 
-    def build_presentation_prompt(self, chunks: List[dict]) -> str:
-        return PRESENTATION_PROMPT_TEMPLATE.format(
+    def build_presentation_prompt(self, chunks: List[dict], seed_character_name: str = None,
+                                   seed_workplace: str = None) -> str:
+        if not seed_character_name or not seed_workplace:
+            seed_character_name, seed_workplace = _random_story_seed()
+        template = _load_presentation_prompt_template()
+        return template.format(
             retrieved_chunks=self._format_context(chunks),
+            seed_character_name=seed_character_name,
+            seed_workplace=seed_workplace,
         )
 
-    @staticmethod
-    def _batch_chunks(chunks: List[dict], max_chars: int = 60000) -> List[List[dict]]:
+    def edit_presentation(self, current_script: str, instruction: str) -> str:
+        """Revise an already-generated training script per a follow-up chat
+        instruction (e.g. "make it shorter", "change the character's name
+        to Priya", "add a line about PPE"). Applies ONLY the requested
+        change and preserves the fixed script format — it does not
+        regenerate a new story or invent a new seed.
+        """
+        prompt = (
+            "You are revising an existing corporate training video script. "
+            "Apply ONLY the requested change below and return the FULL "
+            "revised script — do not summarize, explain, or add commentary "
+            "about the change; output nothing but the revised script "
+            "itself, and keep the exact same structure as the original "
+            "(the 'Story - <name>.mp4' header line, the 'TRT: <MM:SS>' "
+            "line, the 'Narrative Script:' label, bracketed scene/visual "
+            "directions, and 'Narrator (Trainer):' spoken blocks). Do not "
+            "change anything the instruction didn't ask you to change.\n\n"
+            f"CURRENT SCRIPT:\n{current_script}\n\n"
+            f"REQUESTED CHANGE:\n{instruction}\n\n"
+            "Revised script:"
+        )
+        return self._call_llm(prompt)
+
+    def _batch_chunks(self, chunks: List[dict], max_chars: int = 60000) -> List[List[dict]]:
         """Split chunks into batches that each fit within max_chars of context text."""
         batches, current, current_len = [], [], 0
         for chunk in chunks:
@@ -248,15 +314,19 @@ class OpenRouterLLMService:
     def generate_presentation(self, chunks: List[dict]) -> str:
         """Generate a full training script, batching chunks to avoid context limits.
 
-        Always uses the fixed cinematic narrative format (PRESENTATION_PROMPT_TEMPLATE)
-        — the script's structure is standard and is never derived from an
-        uploaded document.
+        The script's SHAPE is fixed (loaded from prompts/presentation_prompt.json)
+        and never derived from an uploaded document. The illustrative STORY inside
+        it is freshly randomized on every call — a different character name and
+        workplace are seeded in each time, and the prompt itself instructs the
+        model to invent the incident from general knowledge rather than reuse
+        anything from the training documents.
         """
+        seed_character_name, seed_workplace = _random_story_seed()
         batches = self._batch_chunks(chunks, max_chars=60000)
 
         if len(batches) == 1:
             # Fits in one call — generate directly
-            prompt = self.build_presentation_prompt(batches[0])
+            prompt = self.build_presentation_prompt(batches[0], seed_character_name, seed_workplace)
             return self._call_llm(prompt)
 
         # Multiple batches: summarize each batch first, then do a final pass
@@ -277,5 +347,10 @@ class OpenRouterLLMService:
 
         # Final pass: generate full script from the combined batch summaries
         combined = "\n\n".join(batch_summaries)
-        final_prompt = PRESENTATION_PROMPT_TEMPLATE.format(retrieved_chunks=combined)
+        template = _load_presentation_prompt_template()
+        final_prompt = template.format(
+            retrieved_chunks=combined,
+            seed_character_name=seed_character_name,
+            seed_workplace=seed_workplace,
+        )
         return self._call_llm(final_prompt)
