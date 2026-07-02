@@ -5,4 +5,13 @@ __pycache__/
 .env
 .idea/
 .vscode/
-data/*
+# Ignore everything inside data
+data/**
+
+# Keep the folders
+!data/
+!data/pdfs/
+
+# Keep placeholder files
+!data/.gitkeep
+!data/pdfs/.gitkeep
