@@ -1,6 +1,7 @@
 # Tested on Python 3.12.10. All pinned versions below are compatible
 # with Python 3.12.x (no changes needed for 3.12.10 specifically).
-
+# --- Excel workbook parsing (content ingestion, one PageContent per sheet) ---
+openpyxl==3.1.5
 # --- Core PDF parsing ---
 pymupdf==1.24.10
 # --- Word document parsing (content ingestion + narrative script templates) ---
@@ -10,6 +11,8 @@ python-docx==1.1.2
 # 'Pillow' is used to convert PyMuPDF pixmaps to PNG before sending to Docker.
 docker>=7.0.0
 Pillow>=10.0.0
+# --- AWS S3 (optional document storage backend) ---
+boto3==1.35.36
 
 # --- LangChain stack ---
 langchain==0.3.7

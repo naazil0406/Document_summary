@@ -1,123 +1,60 @@
-# bot — Document Q&A / RAG Application
+# bot — Document Q&A / Training Script Generator (RAG Application)
 
 A Retrieval-Augmented Generation app — CLI **and** Streamlit UI — that
-answers questions and produces executive summaries strictly from your own
-PDF documents, including scanned/image-heavy ones (via mandatory Docker
-OCR).
+answers questions, produces executive summaries, and generates
+story-driven corporate training video scripts strictly from your own
+documents (PDF, Word, Excel, CSV — including scanned/image-heavy PDFs via
+mandatory Docker OCR).
 
 **Tested on:** Python 3.12.10
 
 ```
-INGESTION:      PDF Folder -> PyMuPDF + Docker Tesseract OCR (every page)
+STORAGE:        Upload -> saved locally (data/pdfs/) AND mirrored to S3
+                (optional) -> fetched back down from S3 on session start
+                / manual sync, so S3 is the durable source of truth
+
+INGESTION:      PDF -> PyMuPDF + Docker Tesseract OCR (every page)
+                DOCX -> python-docx
+                XLSX/XLSM/CSV -> openpyxl / csv (one PageContent per sheet)
                 -> TOC-aware Document Chunking -> Semantic Chunking
                 -> BGE-M3 Embeddings -> Qdrant (Docker)
 
 QUERY (Q&A):    Question -> BGE-M3 Query Embedding -> Qdrant Search
                 -> TOC-section filter -> Document-name filter
-                -> Score filter -> Qwen 2.5 72B (OpenRouter) -> Answer
+                -> Score filter -> LLM (OpenRouter or AWS Bedrock) -> Answer
 
-SUMMARIZATION:  PDF name (fuzzy) -> PyMuPDF + Docker OCR -> TOC-aware
-                Chunking -> Semantic Chunking
-                -> Qwen 2.5 72B (OpenRouter) -> Executive Summary
+SUMMARIZATION:  Document name (fuzzy) -> re-parse + re-chunk fresh
+                -> LLM (OpenRouter or AWS Bedrock) -> Executive Summary
+
+TRAINING SCRIPT: All ingested documents' chunks -> batched if large
+                -> LLM invents a fresh illustrative story around a random
+                seed character/workplace, teaches the real source-document
+                concepts -> saved to Narrative_scripts/*.txt + downloadable
 ```
 
 ---
 
-## What this README replaces
+## What's in this version
 
-This is now the **one** README for the project. `APP_README.md` has been
-folded into this file — you can delete `APP_README.md`.
-
----
-
-## Fixes made in this pass (this session)
-
-I read through the whole pipeline and ran it end-to-end against the two
-sample PDFs in `data/pdfs/`. Three real bugs were found and fixed:
-
-### 1. TOC false-positive was silently dropping real content pages — **fixed**
-
-`services/chunking.py` — `_is_toc_page()` used a check like *"does this
-page have 4+ lines ending in a short number?"* to detect a Table of
-Contents. That's far too broad: slide decks and workbooks are full of
-standalone bullet numbers ("1", "2", "3") and footer page counters
-("4 / 16"), which matched the same pattern.
-
-**Effect before the fix:** on the sample `SkinDisease_CDSS_Presentation`
-deck, 4 genuinely informative slides (Results, Key Contributions,
-Conclusion, etc.) were misclassified as "TOC pages" and **completely
-excluded from the index** — TOC pages are intentionally skipped since
-they're navigation, not content. On the SafeStart workbook, 9 pages were
-wrongly excluded the same way, instead of just the 1 real TOC page.
-
-**Fix:** a line now only counts as a TOC entry if it has a real title
-(≥6 characters of text) before the trailing page number, and standalone
-numeric/footer lines are explicitly excluded. Verified against both
-sample PDFs — now correctly finds 0 TOC pages in the slide deck (it has
-none) and exactly 1 in the workbook (the real one), with zero content
-pages dropped.
-
-### 2. Garbled TOC section labels — **fixed**
-
-Even where TOC parsing worked, dot-leaders written as `". . . . . ."`
-(dots separated by spaces, common in Word-exported PDFs) weren't being
-stripped from the section title, e.g. `toc_section` ended up as
-`"Introducing SafeStart Now.. .  .  .  .  ."` instead of
-`"Introducing SafeStart Now"`. This hurts the retriever's section-name
-fuzzy matching (`unit 2`, `chapter 3`, etc.). Fixed — verified clean
-titles on the sample workbook.
-
-### 3. Plain Q&A naming a document by name wasn't being filtered to it — **fixed**
-
-This was the gap behind your "if I ask by document name it should
-answer Q&A" requirement. `services/retriever.py` only recognized a
-document reference when the question used specific trigger words —
-`"summarize unit2.pdf"`, `"unit 2 overview"`, etc. A plain question like:
-
-> "What does the SkinDisease CDSS presentation say about accuracy?"
-
-has no such trigger word, so it fell through to a full-corpus vector
-search with no per-document narrowing — fine when only one PDF is
-ingested, but wrong once you have several.
-
-**Fix:** added `Retriever._match_known_filename()` — it fuzzy-matches the
-raw question text against the actual filenames returned in the current
-search results (stripping generic words like "the", "document",
-"presentation"), and uses that as the document filter when no
-trigger-word pattern already found one. Verified: questions naming
-either sample PDF now correctly resolve to that file; generic questions
-naming no document are untouched.
-
-### 4. Hardcoded Windows path for the embedding cache — **fixed**
-
-`services/embeddings.py` had `CACHE_DIR = r"E:\huggingface_cache"`
-hardcoded. That's fine only as long as you personally always have an
-`E:` drive — it breaks for anyone else, and it would break entirely if
-you ever containerize the app itself. It's now read from a
-`HF_CACHE_DIR` env var (added to `.env`, defaulted to your existing
-`E:\huggingface_cache` so nothing changes for you), with a portable
-relative-folder fallback if unset.
-
-### Not a bug, but worth knowing
-
-OCR is genuinely mandatory — `pdf_parser.py` calls Docker Tesseract on
-**every** page, even pages with a clean text layer, and prefers the OCR
-result. That's intentional (there's a test asserting it), and it's why
-two pages in the SafeStart workbook sample (a near-blank divider and a
-stylized title page) come back nearly empty when OCR is unavailable —
-real OCR fills those in. The trade-off is slower ingestion, since every
-page round-trips through a Docker container.
-
----
-
-## ⚠️ Your OpenRouter key is sitting in `.env` in plaintext
-
-Your `.env` file (included in this project) has a live
-`OPENROUTER_API_KEY` value committed to it. If this folder has ever been
-zipped and shared, pushed to git, or uploaded anywhere outside your own
-machine, **rotate that key now** at https://openrouter.ai/keys and put
-the new one in `.env`. Never commit `.env` to version control — add it
-to `.gitignore`.
+- **Multi-format ingestion**: PDF, Word (`.docx`), Excel (`.xlsx`/`.xlsm`),
+  and CSV — all flow through the same chunk/embed/store pipeline.
+- **Two LLM providers, switchable in `.env`**: OpenRouter (any model on
+  their catalog) or AWS Bedrock (native `boto3` Converse API — no
+  OpenRouter account needed at all). Same prompts, same behavior, just a
+  different transport underneath.
+- **Optional AWS S3 document storage**: uploads are mirrored to S3 as a
+  durable backup and fetched back down automatically — entirely optional,
+  the app runs local-folder-only if `S3_BUCKET_NAME` is unset.
+- **Externalized prompts**: every prompt (Q&A, summary, presentation
+  script, per-batch extraction, script-editing) lives as a plain `.txt`
+  file in `prompts/`, split into a `_system_prompt.txt` (fixed persona/
+  rules) and `_user_prompt.txt` (the dynamic input) — edit wording without
+  touching code.
+- **Training video script generation**: turns your documents into a
+  cinematic, story-driven narration script for internal training videos,
+  with a fresh randomly-seeded character/workplace every run so it never
+  reuses the same illustrative story twice. Saved automatically to
+  `Narrative_scripts/`.
 
 ---
 
@@ -125,58 +62,63 @@ to `.gitignore`.
 
 ```
 bot/
-├── docker-compose.yml       # Qdrant (persistent) + Tesseract OCR image (pre-pull only)
-├── data/pdfs/               # Drop your PDF files here
+├── docker-compose.yml        # Qdrant (persistent) + Tesseract OCR image (pre-pull only)
+├── data/pdfs/                 # Local working cache of your documents (PDF/Word/Excel/CSV)
+├── Narrative_scripts/          # Generated training scripts saved here (.gitignored)
+├── prompts/                   # Every prompt as a plain .txt file (system + user pairs)
+│   ├── qa_system_prompt.txt / qa_user_prompt.txt
+│   ├── summary_system_prompt.txt / summary_user_prompt.txt
+│   ├── presentation_system_prompt.txt / presentation_user_prompt.txt
+│   ├── batch_extraction_system_prompt.txt / batch_extraction_user_prompt.txt
+│   └── edit_presentation_system_prompt.txt / edit_presentation_user_prompt.txt
 ├── services/
-│   ├── pdf_parser.py        # PyMuPDF + mandatory Docker Tesseract OCR
-│   ├── chunking.py          # Stage 1: TOC-aware DocumentChunker
-│   │                        # Stage 2: SemanticChunkingService
-│   ├── embeddings.py        # BAAI/bge-m3 embeddings (documents + queries)
-│   ├── qdrant_db.py         # Qdrant collection / upsert / search
-│   ├── retriever.py         # Query -> embedding -> Qdrant search
-│   │                        # -> TOC section filter -> filename filter
-│   │                        # -> score filter
-│   └── openrouter_llm.py    # Qwen 2.5 72B via OpenRouter — Q&A + summary prompts
+│   ├── pdf_parser.py          # PyMuPDF + mandatory Docker Tesseract OCR
+│   ├── docx_parser.py         # Word document parsing
+│   ├── excel_parser.py        # Excel (.xlsx/.xlsm) + CSV parsing, one PageContent per sheet
+│   ├── chunking.py            # Stage 1: TOC-aware DocumentChunker
+│   │                          # Stage 2: SemanticChunkingService
+│   ├── embeddings.py          # BAAI/bge-m3 embeddings (documents + queries)
+│   ├── qdrant_db.py           # Qdrant collection / upsert / search
+│   ├── retriever.py           # Query -> embedding -> Qdrant search
+│   │                          # -> TOC section filter -> filename filter -> score filter
+│   ├── s3_storage.py          # Optional: mirror uploads to S3, fetch/sync back down
+│   ├── llm_service.py         # BaseLLMService (shared prompt logic) +
+│   │                          # OpenRouterLLMService + BedrockLLMService
+│   └── document_resolver.py   # Fuzzy filename matching helper
 ├── scripts/
-│   ├── ingest.py            # CLI: run the ingestion pipeline
-│   ├── query.py             # CLI: interactive Q&A
-│   └── summarize.py         # CLI: PDF -> Qwen executive summary (no Qdrant needed)
-├── app.py                   # Streamlit UI — upload, summarize, chat (same services/* backend)
-├── config/settings.py       # Environment-driven configuration + logging
-├── tests/test_chunking_toc.py
+│   ├── ingest.py               # CLI: run the ingestion pipeline (PDF only)
+│   ├── query.py                # CLI: interactive Q&A
+│   └── summarize.py            # CLI: document -> executive summary (no Qdrant needed)
+├── app.py                     # Streamlit UI — the real entry point (upload, summarize,
+│                               # chat, generate training scripts) — all services/* based
+├── config/settings.py         # Environment-driven configuration + logging
 ├── requirements.txt
 └── .env
 ```
+
+> **Note:** `scripts/ingest.py` is a legacy PDF-only CLI utility, kept for
+> reference. `app.py` (Streamlit) is the actual application and supports
+> all four document types plus every feature described here.
 
 ---
 
 ## How To Run This Project (Step by Step)
 
 ### Step 1 — Check your Python version
-
 ```bash
 python --version
 ```
-
 Built and tested against **Python 3.12.10**. Any 3.12.x should work.
 
 ### Step 2 — Install Docker Desktop
-
-Docker is **compulsory** for this project — both Qdrant (vector database)
-and Tesseract OCR run exclusively through Docker. There is no
-local-binary fallback for either.
-
+Docker is **compulsory** — both Qdrant (vector database) and Tesseract
+OCR run exclusively through Docker.
 - **Windows / macOS:** https://www.docker.com/products/docker-desktop/
 - **Linux:** https://docs.docker.com/engine/install/
 
-Verify it's running:
-
-```bash
-docker ps
-```
+Verify it's running: `docker ps`
 
 ### Step 3 — Install Python dependencies
-
 ```bash
 cd bot
 python -m venv venv
@@ -185,223 +127,250 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### Step 4 — Start Qdrant and pre-pull the OCR image (one command each, via Docker Compose)
-
-A `docker-compose.yml` is included so both pieces of required Docker
-infrastructure are managed from one file:
-
+### Step 4 — Start Qdrant and pre-pull the OCR image
 ```bash
-# Start Qdrant (persistent — keeps running in the background)
-docker pull qdrant/qdrant
-mkdir qdrant_storage
-docker run -d --name qdrant -p 6333:6333 -p 6334:6334 -v "E:\Hello_v4\bot\qdrant_storage:/qdrant/storage" qdrant/qdrant
 docker compose up -d qdrant
-
-# One-time: pull the Tesseract OCR image (≈150MB, cached after this)
-docker compose pull tesseract
+docker compose pull tesseract     # one-time, ≈150MB
 ```
+Tesseract is **not** a long-running service — `pdf_parser.py` launches a
+fresh container per page on demand.
 
-Tesseract is **not** started as a long-running service — `pdf_parser.py`
-launches a fresh container per page on demand, using the same Docker
-daemon Compose talks to. The `tesseract` entry in `docker-compose.yml`
-exists purely so the image is declared and pre-pullable in one place.
-
-Verify Qdrant:
+Verify Qdrant: `curl http://localhost:6333/healthz` or open
+http://localhost:6333/dashboard.
 
 ```bash
-curl http://localhost:6333/healthz
-# Expected: {"title":"qdrant - vector search engine","version":"..."}
-```
-
-Or open http://localhost:6333/dashboard in your browser.
-
-```bash
-# Stop later (data is preserved in qdrant_storage/)
-docker compose stop qdrant
-
-# Start again
-docker compose start qdrant
+docker compose stop qdrant     # stop later (data preserved in qdrant_storage/)
+docker compose start qdrant    # start again
 ```
 
 ### Step 5 — Fill in `.env`
 
-Key values:
+At minimum, pick **one** LLM provider and fill in its credentials:
 
+**Option A — OpenRouter (simplest, no AWS account needed):**
 ```dotenv
-QDRANT_URL=http://localhost:6333
+LLM_PROVIDER=openrouter
 OPENROUTER_API_KEY=sk-or-v1-...          # https://openrouter.ai/keys
-HF_CACHE_DIR=E:\huggingface_cache        # where the embedding model is cached
 ```
 
-See **"Where Do I Get My `.env` Values From?"** below for the rest.
+**Option B — AWS Bedrock (runs models directly on AWS, no OpenRouter):**
+```dotenv
+LLM_PROVIDER=bedrock
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_REGION=us-east-1
+```
+See **"AWS Bedrock setup"** below — model access has to be explicitly
+enabled in the Bedrock console before this will work.
 
-### Step 6 — Add your PDFs
+Also set:
+```dotenv
+QDRANT_URL=http://localhost:6333
+HF_CACHE_DIR=/path/to/cache             # where the embedding model is cached
+```
 
-Copy PDFs into `bot/data/pdfs/`. Both born-digital and scanned/image-heavy
-PDFs are handled automatically.
+See **"Full `.env` reference"** below for every setting.
+
+### Step 6 — Add your documents
+Copy PDF, Word, Excel, or CSV files into `bot/data/pdfs/` (the folder name
+is legacy — it now holds all supported formats), or just upload them
+through the Streamlit sidebar once it's running.
 
 ### Step 7 — Run it
 
-**Option A — Streamlit app (recommended, has the summary-card UI):**
-
+**Streamlit app (recommended — the real entry point):**
 ```bash
 streamlit run app.py
 ```
+Opens at http://localhost:8501. Upload a document → it's ingested,
+summarized, and follow-up questions are suggested. Chat with it, generate
+an executive summary, or generate a full training video script — all from
+the sidebar.
 
-Opens at http://localhost:8501. Upload a PDF in the sidebar → it's
-ingested, summarized, and 3 follow-up questions are suggested. Type any
-question in the chat box, or click a suggestion chip. Previously-uploaded
-PDFs appear in a dropdown so you can re-summarize without re-ingesting.
-
-**Option B — CLI:**
-
+**CLI (PDF-only, legacy):**
 ```bash
-# Ingest everything in data/pdfs/
 python -m scripts.ingest
-
-# Ask questions interactively
 python -m scripts.query
-
-# Summarize one PDF directly (doesn't need Qdrant)
 python -m scripts.summarize unit2.pdf
-python -m scripts.summarize unit2
-python -m scripts.summarize "unit 2"
 ```
 
 ---
 
-## Features checklist (what was verified this session)
+## AWS Bedrock setup (only if `LLM_PROVIDER=bedrock`)
 
-| Feature | Status | Notes |
-|---|---|---|
-| PDF parsing (PyMuPDF) | ✅ Verified | Ran against both sample PDFs |
-| OCR via Docker Tesseract | ✅ Working as designed | Mandatory on every page by design — see note above |
-| TOC detection & section chunking | ✅ Fixed | Was dropping real content pages — now accurate |
-| Semantic chunking | ✅ Verified | LangChain `SemanticChunker` + size-guard fallback |
-| Qdrant ingestion/search | ✅ Verified (code path) | Needs a live Qdrant container to fully test — see Step 4 |
-| Ask Q&A by document name | ✅ Fixed | Plain questions naming a document now narrow correctly |
-| Ask Q&A by section (`unit 2`, `chapter 3`) | ✅ Verified | TOC-section filter in `retriever.py` |
-| Executive summary generation | ✅ Verified | 8–10 line normalized output in `openrouter_llm.py` |
-| Streamlit UI (upload, summary card, suggested questions, chat) | ✅ Verified (code path) | Needs `OPENROUTER_API_KEY` + Qdrant running to fully test |
-| Docker Compose for Qdrant + Tesseract | ✅ Added | `docker-compose.yml` |
+Two things live in the **AWS console**, not `.env`:
 
-Everything marked "code path verified" was checked by tracing the logic
-and running the parsing/chunking/retrieval stages directly against your
-sample PDFs (with the LLM and Qdrant calls mocked, since those need live
-network/Docker access I don't have here). The OpenRouter call and the
-live Qdrant round-trip are exactly what `streamlit run app.py` exercises
-for real once you have `.env` filled in and Qdrant running.
+1. **Model access** — Bedrock console → *Model access* → request/enable
+   access to `amazon.nova-micro-v1:0` and `amazon.nova-2-lite-v1:0` in
+   your chosen region. This is a separate opt-in from IAM permissions —
+   valid credentials with `bedrock:InvokeModel` will still fail with
+   `AccessDeniedException` if the model itself isn't enabled.
+2. **IAM permissions** on the user/role in `.env`: `bedrock:InvokeModel`
+   (or `bedrock:Converse`) for the two models above.
+
+Nova 2 Lite needs a **region-prefixed inference profile ID** for
+on-demand access, not the bare model ID:
+```dotenv
+BEDROCK_PRESENTATION_MODEL=us.amazon.nova-2-lite-v1:0      # US regions
+BEDROCK_PRESENTATION_MODEL=global.amazon.nova-2-lite-v1:0  # outside the US
+```
+
+## AWS S3 setup (optional — only if `S3_BUCKET_NAME` is set)
+
+- The bucket must already exist in your AWS account — the app doesn't
+  create it.
+- IAM permissions needed: `s3:GetObject`, `s3:PutObject`, `s3:ListBucket`.
+- If left blank, the app runs entirely local-folder-only — no boto3 calls
+  are made and no AWS credentials are required for storage.
+
+Bedrock and S3 share the same `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`
+/ `AWS_REGION` — one set of credentials covers both.
 
 ---
 
-## Where Do I Get My `.env` Values From?
+## Full `.env` reference
 
-### PDF source folder
 ```dotenv
+# ----- Document source folder (local working cache) -----
 PDF_FOLDER=data/pdfs
-```
 
-### Chunking
-```dotenv
+# ----- Semantic chunking -----
 SEMANTIC_BUFFER_SIZE=1
 SEMANTIC_BREAKPOINT_TYPE=percentile
 SEMANTIC_BREAKPOINT_AMOUNT=95
-MAX_CHUNK_SIZE=1000
-CHUNK_OVERLAP=100
+MAX_CHUNK_SIZE=600
+CHUNK_OVERLAP=60
+
+# ----- Document chunking (headings / sections / paragraphs) -----
 DOC_CHUNK_HEADING_MAX_LENGTH=80
 DOC_CHUNK_MIN_PARAGRAPH_LENGTH=20
-```
-Tuning knobs — no external account needed.
 
-### Embeddings
-```dotenv
+# ----- Embeddings -----
 EMBEDDING_MODEL_NAME=BAAI/bge-m3
-EMBEDDING_DEVICE=cpu
-HF_CACHE_DIR=E:\huggingface_cache
-```
-Set `EMBEDDING_DEVICE=cuda` if you have a GPU. `HF_CACHE_DIR` is where the
-embedding model weights are cached — point it anywhere with space.
+EMBEDDING_DEVICE=cpu                    # "cuda" if you have a GPU
+HF_CACHE_DIR=/path/to/cache
 
-### Qdrant (Docker)
-```dotenv
+# ----- Qdrant (Docker) -----
 QDRANT_URL=http://localhost:6333
-QDRANT_API_KEY=
+QDRANT_API_KEY=                         # empty — default container has no auth
 QDRANT_COLLECTION_NAME=company_docs
-```
-Leave `QDRANT_API_KEY` empty — the default container has no auth.
 
-### Retrieval
-```dotenv
-TOP_K=40
-TOP_K_SUMMARY=40
+# ----- Retrieval -----
+TOP_K=8                                 # chunks retrieved per Q&A query
+TOP_K_SUMMARY=15                        # chunks retrieved per summary
 MIN_RELEVANCE_SCORE=0.40
-```
 
-### OpenRouter
-```dotenv
+# ----- LLM provider switch: "openrouter" or "bedrock" -----
+LLM_PROVIDER=openrouter
+
+# ----- AWS (shared by S3 storage AND Bedrock inference) -----
+AWS_ACCESS_KEY_ID=
+AWS_SECRET_ACCESS_KEY=
+AWS_REGION=us-east-1
+
+# ----- S3 document storage (optional — blank disables it entirely) -----
+S3_BUCKET_NAME=
+S3_PREFIX=documents/
+
+# ----- Bedrock models (used only when LLM_PROVIDER=bedrock) -----
+BEDROCK_REGION=us-east-1
+BEDROCK_MODEL=amazon.nova-micro-v1:0             # Q&A + summary
+BEDROCK_PRESENTATION_MODEL=us.amazon.nova-2-lite-v1:0   # training scripts
+
+# ----- OpenRouter (used only when LLM_PROVIDER=openrouter) -----
 OPENROUTER_API_KEY=
 OPENROUTER_MODEL=qwen/qwen-2.5-72b-instruct
-OPENROUTER_MAX_TOKENS=1024
-OPENROUTER_TEMPERATURE=0.1
-SUMMARY_MAX_TOKENS=2048
-```
-Get a key at https://openrouter.ai/keys (sign up → add credits → create
-key). **Never commit this file or paste your key in screenshots.**
+OPENROUTER_SITE_URL=
+OPENROUTER_SITE_NAME=bot
+PRESENTATION_MODEL=qwen/qwen-2.5-72b-instruct
 
-### Logging
-```dotenv
-LOG_LEVEL=INFO
+# ----- Token / temperature settings (used by whichever provider is active) -----
+OPENROUTER_MAX_TOKENS=512               # Q&A answer length cap
+OPENROUTER_TEMPERATURE=0.1
+SUMMARY_MAX_TOKENS=800
+PRESENTATION_MAX_TOKENS=4096
+PRESENTATION_TEMPERATURE=0.9            # higher — the story should vary run to run
+
+# ----- Where generated training scripts are saved locally -----
+NARRATIVE_SCRIPTS_DIR=Narrative_scripts
+
+# ----- Logging -----
+LOG_LEVEL=INFO                          # DEBUG for verbose chunk-level logs
 ```
-Set to `DEBUG` for verbose chunk-level logs while troubleshooting.
+
+**Never commit `.env` to version control** — it's already in
+`.gitignore`. If a real API key or AWS secret ever ends up committed or
+shared, rotate it immediately.
 
 ---
 
 ## Architecture Notes
 
-- **TOC-aware chunking**: when a PDF has a genuine Table of Contents,
-  content is grouped by section at ingest time, with `toc_section` stored
-  in the Qdrant payload for fast filtering. Pages without a detected TOC
-  fall back to per-page structural splitting.
+- **TOC-aware chunking**: PDFs with a genuine Table of Contents are
+  grouped by section at ingest time (`toc_section` stored in the Qdrant
+  payload). Excel/CSV sheets use their sheet name as `toc_section` the
+  same way, so "what's on the Pricing sheet" narrows correctly. Documents
+  without a detected structure fall back to per-page/per-sheet splitting.
 - **Two-layer retrieval filtering**: TOC-section filter → document-name
   filter (regex trigger words, or fuzzy match against real filenames) →
   score filter. Each layer falls through to the broader result set if
   nothing matches, so an honest answer is still attempted.
-- **Fuzzy summarize / document-name resolution**: works via exact match →
-  stem match → no-space stem match → partial match, in both
-  `scripts/summarize.py` and `app.py`.
 - **Summarization bypasses Qdrant by design**: re-reads and re-chunks the
-  target PDF on demand, so the summary always covers the full document.
-- **OCR and Qdrant are both Docker-only** — no host Tesseract binary, no
-  host Qdrant binary.
+  target document on demand, so the summary always covers the full thing.
+- **LLM provider abstraction**: `services/llm_service.py`'s
+  `BaseLLMService` owns every prompt-building/batching/post-processing
+  method; `OpenRouterLLMService` and `BedrockLLMService` each implement
+  only `_call_llm()` — the actual network call. Switching providers is a
+  one-line `.env` change, never a code change.
+- **Storage abstraction**: S3 is the source of truth for "what documents
+  exist" when configured; `data/pdfs/` is a local working cache of it.
+  Upload → saved locally + mirrored to S3. Fetch → anything in S3 but
+  missing locally is downloaded automatically once per session, or on
+  demand via the sidebar's "Sync from S3" button.
+- **Training script generation**: the script's fixed shape (header line,
+  `TRT:` runtime, scene directions, `Narrator (Trainer):` blocks) comes
+  from `prompts/presentation_*_prompt.txt`; the illustrative story is
+  freshly invented every run using a random seed character name +
+  workplace, so back-to-back generations never converge on the same
+  example even at low temperature. Documents too large for one call are
+  first compressed batch-by-batch via `batch_extraction_*_prompt.txt`,
+  then assembled into the final script.
+- **OCR and Qdrant are both Docker-only** for PDFs — no host Tesseract
+  binary, no host Qdrant binary. Word/Excel/CSV parsing needs no Docker at
+  all (`python-docx`/`openpyxl`/stdlib `csv` run natively).
 
 ---
 
 ## Troubleshooting
 
 - **`docker: command not found`**: Docker Desktop isn't installed or not
-  on PATH. See Step 2.
+  on PATH.
 - **Qdrant container not starting**: `docker compose logs qdrant`. Most
   common cause is port 6333 already in use.
 - **`Connection refused` on `http://localhost:6333`**: container isn't
   running — `docker compose start qdrant`.
-- **`401 Unauthorized` from OpenRouter**: key missing/revoked — see the
-  security note above, regenerate at https://openrouter.ai/keys.
+- **`401 Unauthorized` from OpenRouter**: key missing/revoked — regenerate
+  at https://openrouter.ai/keys.
 - **`402 Payment Required` from OpenRouter**: no credits — add them at
   https://openrouter.ai/settings/credits.
-- **OCR errors / image pages returning empty text**: the Tesseract image
-  isn't pulled yet — `docker compose pull tesseract`. If Docker itself
-  isn't running, ingestion will fail loudly (by design — OCR is
-  mandatory, not best-effort).
-- **TOC not detected on a document that has one**: check `LOG_LEVEL=DEBUG`
-  output. Roman-numeral page numbers in the TOC aren't supported yet —
-  per-page chunking is used as the automatic fallback.
+- **`AccessDeniedException` from Bedrock**: almost always means the model
+  hasn't been enabled in *Model access* in the Bedrock console for your
+  region — this is separate from IAM permissions.
+- **Bedrock error asking for an "inference profile"**: you're using a
+  bare model ID that requires a region-prefixed one (Nova 2 Lite does) —
+  use `us.amazon.nova-2-lite-v1:0` / `global.amazon.nova-2-lite-v1:0`.
+- **S3 sync fails on startup**: check `S3_BUCKET_NAME` is a real,
+  existing bucket (not a placeholder value) and that your AWS credentials
+  have `s3:ListBucket`/`s3:GetObject`/`s3:PutObject` on it.
+- **OCR errors / image PDF pages returning empty text**: the Tesseract
+  image isn't pulled yet — `docker compose pull tesseract`.
+- **TOC not detected on a document that has one**: check
+  `LOG_LEVEL=DEBUG` output. Roman-numeral TOC page numbers aren't
+  supported — per-page chunking is the automatic fallback.
 - **A Q&A question naming a document isn't being narrowed to it**: the
-  fuzzy filename match requires either 2+ overlapping significant words
-  with the filename, or the filename's stem to be a single distinctive
-  word. Very generic filenames (`report.pdf`, `doc1.pdf`) won't match
-  well from a plain question — name the file something more descriptive,
-  or use the explicit `.pdf` filename / `summarize <name>` phrasing.
-- **Empty or low-quality answers**: try lowering `MIN_RELEVANCE_SCORE`
-  (default 0.40) or increasing `TOP_K`.
-- **`ModuleNotFoundError`**: activate the virtual environment before any
-  `python -m scripts.*` command or `streamlit run app.py`.
+  fuzzy filename match needs either 2+ overlapping significant words with
+  the filename, or a single distinctive stem word. Very generic filenames
+  (`report.pdf`, `doc1.pdf`) won't match well from a plain question.
+- **Excel/CSV sheet not showing up**: fully-empty sheets are skipped
+  automatically; check the sheet actually has data in `openpyxl`/Excel
+  itself.

@@ -33,6 +33,8 @@ Run with (from inside the bot/ folder):
 import logging
 import os
 import re
+from datetime import datetime
+from typing import Optional
 
 import streamlit as st
 
@@ -45,13 +47,16 @@ logger = logging.getLogger(__name__)
 from config.settings import settings  # noqa: E402
 from services.pdf_parser import PDFParser  # noqa: E402
 from services.docx_parser import DocxParser  # noqa: E402
+from services.excel_parser import ExcelParser  # noqa: E402
+from services.s3_storage import S3Storage  # noqa: E402
 from services.chunking import DocumentChunker, SemanticChunkingService  # noqa: E402
 from services.embeddings import EmbeddingService  # noqa: E402
 from services.qdrant_db import QdrantService  # noqa: E402
 from services.retriever import Retriever, SUMMARY_KEYWORDS  # noqa: E402
-from services.openrouter_llm import (  # noqa: E402
+from services.llm_service import (  # noqa: E402
     FALLBACK_ANSWER,
     OpenRouterLLMService,
+    BedrockLLMService,
 )
 from services.document_resolver import (  # noqa: E402
     resolve_pdf_reference,
@@ -63,6 +68,12 @@ from services.document_resolver import (  # noqa: E402
 # BACKEND — orchestration logic (this is what scripts/*.py used to do,
 # now implemented directly in Streamlit on top of services/ only).
 # ===========================================================================
+
+# File types the pipeline can ingest as training content. Each maps to its
+# own parser (PDFParser / DocxParser / ExcelParser) but all of them emit the
+# same PageContent objects, so everything downstream (chunking, embedding,
+# Qdrant storage, retrieval) is identical regardless of source format.
+SUPPORTED_EXTENSIONS = (".pdf", ".docx", ".xlsx", ".xlsm", ".csv")
 
 # ---------------------------------------------------------------------------
 # Cached resources — heavy objects loaded once per process.
@@ -85,6 +96,21 @@ def get_qdrant_service() -> QdrantService:
 
 
 @st.cache_resource(show_spinner=False)
+def get_s3_storage() -> Optional[S3Storage]:
+    """Return an S3Storage, or None if S3_BUCKET_NAME isn't configured —
+    in which case the app runs local-folder-only, exactly as before."""
+    if not settings.S3_BUCKET_NAME:
+        return None
+    return S3Storage(
+        bucket_name=settings.S3_BUCKET_NAME,
+        prefix=settings.S3_PREFIX,
+        region_name=settings.AWS_REGION,
+        aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+    )
+
+
+@st.cache_resource(show_spinner=False)
 def get_retriever(_embedding_service, _qdrant_service) -> Retriever:
     return Retriever(
         _embedding_service,
@@ -97,6 +123,15 @@ def get_retriever(_embedding_service, _qdrant_service) -> Retriever:
 
 @st.cache_resource(show_spinner=False)
 def get_qa_llm() -> OpenRouterLLMService:
+    if settings.LLM_PROVIDER == "bedrock":
+        return BedrockLLMService(
+            model=settings.BEDROCK_MODEL,
+            max_tokens=settings.OPENROUTER_MAX_TOKENS,
+            temperature=settings.OPENROUTER_TEMPERATURE,
+            region_name=settings.BEDROCK_REGION,
+            aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+        )
     return OpenRouterLLMService(
         api_key=settings.OPENROUTER_API_KEY,
         model=settings.OPENROUTER_MODEL,
@@ -109,6 +144,15 @@ def get_qa_llm() -> OpenRouterLLMService:
 
 @st.cache_resource(show_spinner=False)
 def get_summary_llm() -> OpenRouterLLMService:
+    if settings.LLM_PROVIDER == "bedrock":
+        return BedrockLLMService(
+            model=settings.BEDROCK_MODEL,
+            max_tokens=settings.SUMMARY_MAX_TOKENS,
+            temperature=settings.OPENROUTER_TEMPERATURE,
+            region_name=settings.BEDROCK_REGION,
+            aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+        )
     return OpenRouterLLMService(
         api_key=settings.OPENROUTER_API_KEY,
         model=settings.OPENROUTER_MODEL,
@@ -121,6 +165,15 @@ def get_summary_llm() -> OpenRouterLLMService:
 
 @st.cache_resource(show_spinner=False)
 def get_presentation_llm() -> OpenRouterLLMService:
+    if settings.LLM_PROVIDER == "bedrock":
+        return BedrockLLMService(
+            model=settings.BEDROCK_PRESENTATION_MODEL,
+            max_tokens=settings.PRESENTATION_MAX_TOKENS,
+            temperature=settings.PRESENTATION_TEMPERATURE,
+            region_name=settings.BEDROCK_REGION,
+            aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+        )
     return OpenRouterLLMService(
         api_key=settings.OPENROUTER_API_KEY,
         model=settings.PRESENTATION_MODEL,
@@ -137,7 +190,7 @@ def get_presentation_llm() -> OpenRouterLLMService:
 def resolve_filename(name: str, pdf_folder: str):
     try:
         candidates = [
-            f for f in os.listdir(pdf_folder) if f.lower().endswith((".pdf", ".docx"))
+            f for f in os.listdir(pdf_folder) if f.lower().endswith(SUPPORTED_EXTENSIONS)
         ]
     except OSError:
         return None
@@ -234,6 +287,28 @@ def ingest_single_docx(file_path: str, embedding_service: EmbeddingService,
     return len(chunks)
 
 
+def ingest_single_excel(file_path: str, embedding_service: EmbeddingService,
+                         qdrant_service: QdrantService) -> int:
+    """Ingest an .xlsx/.xlsm/.csv training-content file the same way
+    ingest_single_pdf ingests a PDF. Each sheet becomes one PageContent
+    (a CSV has exactly one implicit sheet); see ExcelParser.extract_pages.
+    The sheet name is stored as toc_section so a query naming a sheet can
+    be narrowed to it. Like .docx, there's no PDF-style page-level TOC
+    step here."""
+    parser = ExcelParser(excel_folder=settings.PDF_FOLDER)
+    chunks = parse_and_chunk(file_path, embedding_service, parser=parser)
+    if not chunks:
+        return 0
+
+    chunk_texts = [c.text for c in chunks]
+    chunk_embeddings = embedding_service.embed_documents(chunk_texts)
+
+    qdrant_service.ensure_collection(vector_size=len(chunk_embeddings[0]))
+    qdrant_service.upsert_chunks(chunks, chunk_embeddings)
+
+    return len(chunks)
+
+
 # ---------------------------------------------------------------------------
 # Summarization after upload: read the chunks already persisted in Qdrant.
 # ---------------------------------------------------------------------------
@@ -246,6 +321,26 @@ def _get_all_chunks(name: str, qdrant_service):
     return [{"text": c["text"], "filename": c["filename"], "page_label": c["page_label"]} for c in raw]
 
 
+def save_narrative_script(script_text: str, label: str) -> str:
+    """Save a generated training script as a .txt file in the local
+    Narrative_scripts folder (settings.NARRATIVE_SCRIPTS_DIR) and return the
+    path it was written to. Filenames are timestamped so repeated
+    generations never overwrite each other.
+    """
+    os.makedirs(settings.NARRATIVE_SCRIPTS_DIR, exist_ok=True)
+
+    safe_label = re.sub(r"[^A-Za-z0-9_-]+", "_", label).strip("_") or "script"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"training_script_{safe_label}_{timestamp}.txt"
+    path = os.path.join(settings.NARRATIVE_SCRIPTS_DIR, filename)
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(script_text)
+
+    logger.info("Saved training script to '%s'.", path)
+    return path
+
+
 def summarize_indexed_document(
     name: str,
     qdrant_service: QdrantService,
@@ -256,7 +351,7 @@ def summarize_indexed_document(
     if chunks is None:
         available = ", ".join(
             f for f in os.listdir(settings.PDF_FOLDER)
-            if f.lower().endswith((".pdf", ".docx"))
+            if f.lower().endswith(SUPPORTED_EXTENSIONS)
         ) if os.path.isdir(settings.PDF_FOLDER) else "(folder not found)"
         return (
             f"File not found for '{name}' in {settings.PDF_FOLDER}.\n"
@@ -356,7 +451,15 @@ st.set_page_config(page_title="Document Q&A Assistant", page_icon="📄", layout
 st.title("📄 Document Q&A Assistant")
 st.caption("Upload a PDF, get an instant summary with suggested questions, then chat with your documents.")
 
-if not settings.OPENROUTER_API_KEY:
+if settings.LLM_PROVIDER == "bedrock":
+    if not (settings.AWS_ACCESS_KEY_ID and settings.AWS_SECRET_ACCESS_KEY):
+        st.info(
+            "LLM_PROVIDER=bedrock with no AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY in .env — "
+            "falling back to boto3's default credential chain (IAM role, AWS CLI config, etc.). "
+            "If that's not configured either, uploading/summarizing/querying will fail.",
+            icon="ℹ️",
+        )
+elif not settings.OPENROUTER_API_KEY:
     st.warning(
         "OPENROUTER_API_KEY is not set in .env — uploading/summarizing/"
         "querying will fail until it's configured.",
@@ -373,13 +476,32 @@ st.session_state.setdefault("summary_notice", None)
 st.session_state.setdefault("summary_cache", {})
 st.session_state.setdefault("presentation_text", None)
 st.session_state.setdefault("presentation_filename", None)
+st.session_state.setdefault("presentation_saved_path", None)
 
 os.makedirs(settings.PDF_FOLDER, exist_ok=True)
+
+s3_storage = get_s3_storage()
+
+# Pull down anything that's in S3 but not yet in the local working folder
+# (fresh checkout, restarted container, another machine's upload, etc.).
+# Only done once per session — not on every rerun — since it's a network
+# call; a manual "Sync from S3" button in the sidebar covers refreshing
+# mid-session without needing to restart the app.
+st.session_state.setdefault("s3_synced", False)
+if s3_storage and not st.session_state.s3_synced:
+    try:
+        with st.spinner("Fetching documents from S3..."):
+            downloaded = s3_storage.sync_down(settings.PDF_FOLDER)
+        if downloaded:
+            st.toast(f"Fetched {len(downloaded)} document(s) from S3.", icon="📦")
+    except Exception as exc:
+        st.warning(f"Could not sync from S3: {exc}", icon="⚠️")
+    st.session_state.s3_synced = True
 
 
 def _existing_documents():
     return sorted(
-        f for f in os.listdir(settings.PDF_FOLDER) if f.lower().endswith((".pdf", ".docx"))
+        f for f in os.listdir(settings.PDF_FOLDER) if f.lower().endswith(SUPPORTED_EXTENSIONS)
     )
 
 
@@ -387,8 +509,24 @@ def _existing_documents():
 # Sidebar — upload & document picker
 # ---------------------------------------------------------------------------
 with st.sidebar:
+    if s3_storage:
+        if st.button("🔄 Sync from S3", use_container_width=True):
+            try:
+                with st.spinner("Fetching documents from S3..."):
+                    downloaded = s3_storage.sync_down(settings.PDF_FOLDER)
+                st.toast(
+                    f"Fetched {len(downloaded)} new document(s) from S3."
+                    if downloaded else "Already up to date with S3.",
+                    icon="📦",
+                )
+            except Exception as exc:
+                st.warning(f"Could not sync from S3: {exc}", icon="⚠️")
+
     st.header("📤 Upload a document")
-    uploaded_file = st.file_uploader("Choose a PDF or Word document", type=["pdf", "docx"])
+    uploaded_file = st.file_uploader(
+        "Choose a PDF, Word, Excel, or CSV document",
+        type=["pdf", "docx", "xlsx", "xlsm", "csv"],
+    )
 
     if uploaded_file is not None:
         if st.button("Process & Summarize", type="primary", use_container_width=True):
@@ -399,6 +537,13 @@ with st.sidebar:
             with open(dest_path, "wb") as f:
                 f.write(uploaded_file.getbuffer())
 
+            if s3_storage:
+                try:
+                    s3_uri = s3_storage.upload_file(dest_path, uploaded_file.name)
+                    st.toast(f"Backed up to {s3_uri}", icon="📦")
+                except Exception as exc:
+                    st.warning(f"Saved locally, but S3 upload failed: {exc}", icon="⚠️")
+
             embedding_service = get_embedding_service()
             qdrant_service = get_qdrant_service()
             summary_llm = get_summary_llm()
@@ -408,6 +553,8 @@ with st.sidebar:
                     with st.spinner(f"Reading and indexing '{uploaded_file.name}'..."):
                         if file_ext == ".docx":
                             n_chunks = ingest_single_docx(dest_path, embedding_service, qdrant_service)
+                        elif file_ext in (".xlsx", ".xlsm", ".csv"):
+                            n_chunks = ingest_single_excel(dest_path, embedding_service, qdrant_service)
                         else:
                             n_chunks = ingest_single_pdf(dest_path, embedding_service, qdrant_service)
                     if n_chunks == 0:
@@ -496,6 +643,9 @@ with st.sidebar:
                         presentation_text = presentation_llm.generate_presentation(all_chunks)
                     st.session_state.presentation_text = presentation_text
                     st.session_state.presentation_filename = "All Documents"
+                    st.session_state.presentation_saved_path = save_narrative_script(
+                        presentation_text, st.session_state.presentation_filename
+                    )
             except Exception as exc:
                 st.error(f"Something went wrong while generating the training script: {exc}")
 
@@ -508,6 +658,7 @@ with st.sidebar:
         st.session_state.summary_cache = {}
         st.session_state.presentation_text = None
         st.session_state.presentation_filename = None
+        st.session_state.presentation_saved_path = None
         st.rerun()
 
 
@@ -530,6 +681,8 @@ if st.session_state.presentation_text:
     with st.container(border=True):
         st.subheader(f"📋 Training Script — {st.session_state.presentation_filename}")
         st.markdown(st.session_state.presentation_text)
+        if st.session_state.presentation_saved_path:
+            st.caption(f"💾 Saved locally to `{st.session_state.presentation_saved_path}`")
         st.download_button(
             label="⬇️ Download Training Script (.txt)",
             data=st.session_state.presentation_text,

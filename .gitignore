@@ -15,3 +15,7 @@ data/**
 # Keep placeholder files
 !data/.gitkeep
 !data/pdfs/.gitkeep
+
+Narrative_scripts/**
+!Narrative_scripts/
+!Narrative_scripts/.gitkeep
