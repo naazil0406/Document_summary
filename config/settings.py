@@ -53,6 +53,7 @@ class Settings:
     # --- Embeddings ---
     EMBEDDING_MODEL_NAME: str = os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-m3")
     EMBEDDING_DEVICE: str = os.getenv("EMBEDDING_DEVICE", "cpu")
+    INDEX_BATCH_SIZE: int = int(os.getenv("INDEX_BATCH_SIZE", "32"))
 
     # --- Qdrant ---
     QDRANT_URL: str = os.getenv("QDRANT_URL", "http://localhost:6333")
@@ -62,7 +63,7 @@ class Settings:
     # --- Retrieval ---
     TOP_K: int = int(os.getenv("TOP_K", "40"))
     TOP_K_SUMMARY: int = int(os.getenv("TOP_K_SUMMARY", "40"))
-    MIN_RELEVANCE_SCORE: float = float(os.getenv("MIN_RELEVANCE_SCORE", "0.40"))
+    MIN_RELEVANCE_SCORE: float = float(os.getenv("MIN_RELEVANCE_SCORE", "0.05"))
 
     # --- LLM provider switch: "openrouter" (default) or "bedrock" ---
     # Bedrock reuses the AWS_* credentials/region already configured above

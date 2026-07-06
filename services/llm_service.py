@@ -16,6 +16,7 @@ app.py's point of view — app.py picks which one to instantiate based on
 settings.LLM_PROVIDER ("openrouter" or "bedrock").
 """
 
+import json
 import logging
 import os
 import random
@@ -49,33 +50,68 @@ _PROMPTS_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "prompts"
 )
 
-_QA_SYSTEM_PROMPT_PATH = os.path.join(_PROMPTS_DIR, "qa_system_prompt.txt")
-_QA_USER_PROMPT_PATH = os.path.join(_PROMPTS_DIR, "qa_user_prompt.txt")
+def _resolve_prompt_path(primary: str, fallback: str) -> str:
+    """Return the first existing prompt path, falling back to the simple prompt file name."""
+    if os.path.exists(primary):
+        return primary
+    if os.path.exists(fallback):
+        return fallback
+    return primary
 
-_SUMMARY_SYSTEM_PROMPT_PATH = os.path.join(_PROMPTS_DIR, "summary_system_prompt.txt")
-_SUMMARY_USER_PROMPT_PATH = os.path.join(_PROMPTS_DIR, "summary_user_prompt.txt")
 
-_BATCH_EXTRACTION_SYSTEM_PROMPT_PATH = os.path.join(
-    _PROMPTS_DIR, "batch_extraction_system_prompt.txt"
+_QA_SYSTEM_PROMPT_PATH = _resolve_prompt_path(
+    os.path.join(_PROMPTS_DIR, "qa_system_prompt.txt"),
+    os.path.join(_PROMPTS_DIR, "qa_prompt.txt"),
 )
-_BATCH_EXTRACTION_USER_PROMPT_PATH = os.path.join(
-    _PROMPTS_DIR, "batch_extraction_user_prompt.txt"
-)
-
-_EDIT_PRESENTATION_SYSTEM_PROMPT_PATH = os.path.join(
-    _PROMPTS_DIR, "edit_presentation_system_prompt.txt"
-)
-_EDIT_PRESENTATION_USER_PROMPT_PATH = os.path.join(
-    _PROMPTS_DIR, "edit_presentation_user_prompt.txt"
+_QA_USER_PROMPT_PATH = _resolve_prompt_path(
+    os.path.join(_PROMPTS_DIR, "qa_user_prompt.txt"),
+    os.path.join(_PROMPTS_DIR, "qa_prompt.txt"),
 )
 
-_PRESENTATION_SYSTEM_PROMPT_PATH = os.getenv(
-    "PRESENTATION_SYSTEM_PROMPT_PATH",
-    os.path.join(_PROMPTS_DIR, "presentation_system_prompt.txt"),
+_SUMMARY_SYSTEM_PROMPT_PATH = _resolve_prompt_path(
+    os.path.join(_PROMPTS_DIR, "summary_system_prompt.txt"),
+    os.path.join(_PROMPTS_DIR, "summary_prompt.txt"),
 )
-_PRESENTATION_USER_PROMPT_PATH = os.getenv(
-    "PRESENTATION_USER_PROMPT_PATH",
-    os.path.join(_PROMPTS_DIR, "presentation_user_prompt.txt"),
+_SUMMARY_USER_PROMPT_PATH = _resolve_prompt_path(
+    os.path.join(_PROMPTS_DIR, "summary_user_prompt.txt"),
+    os.path.join(_PROMPTS_DIR, "summary_prompt.txt"),
+)
+
+_BATCH_EXTRACTION_SYSTEM_PROMPT_PATH = _resolve_prompt_path(
+    os.path.join(_PROMPTS_DIR, "batch_extraction_system_prompt.txt"),
+    os.path.join(_PROMPTS_DIR, "batch_extraction_prompt.txt"),
+)
+_BATCH_EXTRACTION_USER_PROMPT_PATH = _resolve_prompt_path(
+    os.path.join(_PROMPTS_DIR, "batch_extraction_user_prompt.txt"),
+    os.path.join(_PROMPTS_DIR, "batch_extraction_prompt.txt"),
+)
+
+_EDIT_PRESENTATION_SYSTEM_PROMPT_PATH = _resolve_prompt_path(
+    os.path.join(_PROMPTS_DIR, "edit_presentation_system_prompt.txt"),
+    os.path.join(_PROMPTS_DIR, "edit_presentation_prompt.txt"),
+)
+_EDIT_PRESENTATION_USER_PROMPT_PATH = _resolve_prompt_path(
+    os.path.join(_PROMPTS_DIR, "edit_presentation_user_prompt.txt"),
+    os.path.join(_PROMPTS_DIR, "edit_presentation_prompt.txt"),
+)
+
+_PRESENTATION_SYSTEM_PROMPT_PATH = _resolve_prompt_path(
+    os.getenv(
+        "PRESENTATION_SYSTEM_PROMPT_PATH",
+        os.path.join(_PROMPTS_DIR, "presentation_system_prompt.txt"),
+    ),
+    os.path.join(_PROMPTS_DIR, "presentation_prompt.txt"),
+)
+_PRESENTATION_USER_PROMPT_PATH = _resolve_prompt_path(
+    os.getenv(
+        "PRESENTATION_USER_PROMPT_PATH",
+        os.path.join(_PROMPTS_DIR, "presentation_user_prompt.txt"),
+    ),
+    os.path.join(_PROMPTS_DIR, "presentation_prompt.txt"),
+)
+
+_EXCEL_RESTRUCTURING_SYSTEM_PROMPT_PATH = os.path.join(
+    _PROMPTS_DIR, "excel_restructuring_system_prompt.txt"
 )
 
 # Seed pool used to force a different illustrative character/workplace into
@@ -157,6 +193,10 @@ def load_presentation_prompts() -> Tuple[str, str]:
     )
 
 
+def load_excel_restructuring_system_prompt() -> str:
+    return _load_prompt_template(_EXCEL_RESTRUCTURING_SYSTEM_PROMPT_PATH)
+
+
 def random_story_seed() -> Tuple[str, str]:
     """Pick a random character name + workplace to seed a unique story."""
     name = f"{random.choice(_SEED_FIRST_NAMES)} {random.choice(_SEED_LAST_NAMES)}"
@@ -215,6 +255,46 @@ def batch_chunks(chunks: List[dict], max_chars: int = 60000) -> List[List[dict]]
     if current:
         batches.append(current)
     return batches
+
+
+def render_structured_document(doc: dict) -> str:
+    """Flatten the excel-restructuring JSON schema (document_title,
+    document_type, sections[{title, content, subsections}]) back into
+    heading-marked plain text, so it can flow through the existing
+    DocumentChunker (which splits on heading-like lines) exactly like any
+    other page's text — the JSON's hierarchy is preserved as Markdown-style
+    '#'/'##'/'###' heading depth rather than lost.
+    """
+    lines: List[str] = []
+
+    title = doc.get("document_title") or ""
+    doc_type = doc.get("document_type") or ""
+    if title:
+        lines.append(f"# {title}")
+    if doc_type:
+        lines.append(f"Document type: {doc_type}")
+    if title or doc_type:
+        lines.append("")
+
+    def render_section(section: dict, depth: int) -> None:
+        heading_marker = "#" * min(depth, 6)
+        section_title = section.get("title") or section.get("section_id") or ""
+        if section_title:
+            lines.append(f"{heading_marker} {section_title}")
+
+        for item in section.get("content", []) or []:
+            lines.append(str(item))
+
+        if section.get("content"):
+            lines.append("")
+
+        for subsection in section.get("subsections", []) or []:
+            render_section(subsection, depth + 1)
+
+    for section in doc.get("sections", []) or []:
+        render_section(section, 2)
+
+    return "\n".join(lines).strip()
 
 
 class BaseLLMService:
@@ -336,6 +416,47 @@ class BaseLLMService:
             seed_workplace=seed_workplace,
         )
         return self._call_llm(system_template, final_user_prompt)
+
+    def restructure_excel_content(self, raw_content: str, file_name: str, sheet_name: str) -> dict:
+        """Send raw flattened spreadsheet rows through the excel-restructuring
+        prompt and return the parsed JSON (document_title, document_type,
+        sections[{title, content, subsections, metadata}], metadata).
+
+        This is a pure reorganization pass — no summarizing, no answering,
+        no invented content — meant to run BEFORE chunking/embedding, so
+        messy spreadsheet layout (merged-cell repeats, inconsistent
+        grouping) becomes a clean hierarchy the chunker can split on
+        sensibly. Raises RuntimeError if the model doesn't return valid
+        JSON, rather than silently falling back to the raw, unstructured
+        text — a caller can catch that and use the raw text instead if it
+        wants a soft-fail behavior.
+
+        Unlike every other prompt pair in this file, this one has no
+        separate user-prompt .txt template — the system prompt alone fully
+        specifies the task, so the user turn is just the raw data.
+        """
+        system_prompt = load_excel_restructuring_system_prompt()
+        user_prompt = (
+            f"File name: {file_name}\n"
+            f"Sheet name: {sheet_name}\n\n"
+            f"Extracted content:\n{raw_content}"
+        )
+        response = self._call_llm(system_prompt, user_prompt)
+
+        # Models occasionally wrap JSON in ```json ... ``` even when told
+        # not to — strip that defensively before parsing.
+        cleaned = response.strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+            cleaned = re.sub(r"\s*```$", "", cleaned)
+
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"Excel restructuring for '{file_name}' / sheet '{sheet_name}' "
+                f"did not return valid JSON: {exc}\nRaw response: {response[:500]}"
+            ) from exc
 
 
 # ===========================================================================

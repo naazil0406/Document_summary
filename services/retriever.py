@@ -287,7 +287,7 @@ class Retriever:
         if not self._is_summary_query(query):
             logger.info("Searching TOC...")
             try:
-                toc_results = self.qdrant_service.search_toc(query_vector)
+                toc_results = self.qdrant_service.search_toc(query_vector, top_k=10)
             except Exception as exc:
                 logger.warning(
                     "TOC search unavailable (%s). Using semantic retrieval.",
@@ -363,6 +363,29 @@ class Retriever:
 
         # ── Filter by minimum relevance score ────────────────────────────────
         filtered = [r for r in results if r.get("score", 0.0) >= self.min_relevance_score]
+
+        # The Bedrock embeddings can yield low absolute similarity scores for
+        # tabular/workbook content, so add a keyword overlap fallback before
+        # giving up. This keeps Excel questions from failing when the semantic
+        # scores are weak but the chunk text still clearly matches the query.
+        if not filtered and results:
+            query_terms = set(re.findall(r"[a-z0-9]+", retrieval_query.lower()))
+            query_terms = {term for term in query_terms if len(term) > 2}
+            keyword_matches = []
+            for result in results:
+                text = (result.get("text", "") or "").lower()
+                terms = set(re.findall(r"[a-z0-9]+", text))
+                overlap = len(query_terms & terms)
+                if overlap:
+                    keyword_matches.append((overlap, result))
+            if keyword_matches:
+                keyword_matches.sort(key=lambda item: item[0], reverse=True)
+                filtered = [result for _, result in keyword_matches[: min(8, len(keyword_matches))]]
+                logger.info(
+                    "Keyword fallback matched %d chunk(s) using %d shared term(s).",
+                    len(filtered),
+                    max(overlap for overlap, _ in keyword_matches),
+                )
 
         if len(filtered) < len(results):
             logger.info(

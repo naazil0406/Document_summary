@@ -33,6 +33,7 @@ Run with (from inside the bot/ folder):
 import logging
 import os
 import re
+import uuid
 from datetime import datetime
 from typing import Optional
 
@@ -49,7 +50,7 @@ from services.pdf_parser import PDFParser  # noqa: E402
 from services.docx_parser import DocxParser  # noqa: E402
 from services.excel_parser import ExcelParser  # noqa: E402
 from services.s3_storage import S3Storage  # noqa: E402
-from services.chunking import DocumentChunker, SemanticChunkingService  # noqa: E402
+from services.chunking import Chunk, DocumentChunker, SemanticChunkingService  # noqa: E402
 from services.embeddings import EmbeddingService  # noqa: E402
 from services.qdrant_db import QdrantService  # noqa: E402
 from services.retriever import Retriever, SUMMARY_KEYWORDS  # noqa: E402
@@ -73,7 +74,7 @@ from services.document_resolver import (  # noqa: E402
 # own parser (PDFParser / DocxParser / ExcelParser) but all of them emit the
 # same PageContent objects, so everything downstream (chunking, embedding,
 # Qdrant storage, retrieval) is identical regardless of source format.
-SUPPORTED_EXTENSIONS = (".pdf", ".docx", ".xlsx", ".xlsm", ".csv")
+SUPPORTED_EXTENSIONS = (".pdf", ".docx", ".xlsx", ".xlsm", ".xls", ".csv")
 
 # ---------------------------------------------------------------------------
 # Cached resources — heavy objects loaded once per process.
@@ -205,11 +206,29 @@ def parse_and_chunk(
     file_path: str,
     embedding_service: EmbeddingService,
     parser: PDFParser = None,
+    use_semantic_chunking: bool = True,
 ):
     parser = parser or PDFParser(pdf_folder=settings.PDF_FOLDER)
     pages = parser.extract_pages(file_path)
     if not pages:
         return None
+
+    if isinstance(parser, ExcelParser):
+        return [
+            Chunk(
+                chunk_id=str(uuid.uuid4()),
+                text=page.text,
+                filename=page.filename,
+                page_number=page.page_number,
+                page_label=page.page_label,
+                page_start=(page.metadata or {}).get("row_start", page.page_number),
+                page_end=(page.metadata or {}).get("row_end", page.page_number),
+                metadata=dict(page.metadata or {}),
+                toc_section=(page.metadata or {}).get("toc_section", ""),
+            )
+            for page in pages
+            if page.text and page.text.strip()
+        ] or None
 
     document_chunker = DocumentChunker(
         heading_max_length=settings.DOC_CHUNK_HEADING_MAX_LENGTH,
@@ -218,6 +237,22 @@ def parse_and_chunk(
     document_chunks = document_chunker.chunk_pages(pages)
     if not document_chunks:
         return None
+
+    if not use_semantic_chunking:
+        return [
+            Chunk(
+                chunk_id=str(uuid.uuid4()),
+                text=dc.text,
+                filename=dc.filename,
+                page_number=dc.page_number,
+                page_label=dc.page_label,
+                page_start=dc.page_start,
+                page_end=dc.page_end,
+                metadata=dict(dc.metadata or {}),
+                toc_section=(dc.metadata or {}).get("toc_section", ""),
+            )
+            for idx, dc in enumerate(document_chunks)
+        ]
 
     semantic_chunker = SemanticChunkingService(
         embeddings=embedding_service.langchain_embeddings,
@@ -235,6 +270,31 @@ def parse_and_chunk(
 # Ingestion: parse -> chunk -> embed -> upsert into Qdrant
 # (was scripts/ingest.py, scoped to a single file)
 # ---------------------------------------------------------------------------
+def _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service) -> None:
+    """Embed and persist bounded batches to keep large documents memory-safe."""
+    batch_size = max(1, settings.INDEX_BATCH_SIZE)
+    first_batch = chunks[:batch_size]
+    if not first_batch:
+        return
+
+    # Prove embedding works before replacing an existing document.
+    embeddings = embedding_service.embed_documents(
+        [chunk.text for chunk in first_batch]
+    )
+    if not embeddings:
+        raise RuntimeError("Embedding service returned no vectors.")
+    qdrant_service.ensure_collection(vector_size=len(embeddings[0]))
+    qdrant_service.delete_document(first_batch[0].filename)
+    qdrant_service.upsert_chunks(first_batch, embeddings)
+
+    for offset in range(batch_size, len(chunks), batch_size):
+        batch = chunks[offset:offset + batch_size]
+        embeddings = embedding_service.embed_documents([chunk.text for chunk in batch])
+        if not embeddings:
+            raise RuntimeError("Embedding service returned no vectors.")
+        qdrant_service.upsert_chunks(batch, embeddings)
+
+
 def ingest_single_pdf(file_path: str, embedding_service: EmbeddingService,
                       qdrant_service: QdrantService) -> int:
     parser = PDFParser(pdf_folder=settings.PDF_FOLDER)
@@ -242,11 +302,7 @@ def ingest_single_pdf(file_path: str, embedding_service: EmbeddingService,
     if not chunks:
         return 0
 
-    chunk_texts = [c.text for c in chunks]
-    chunk_embeddings = embedding_service.embed_documents(chunk_texts)
-
-    qdrant_service.ensure_collection(vector_size=len(chunk_embeddings[0]))
-    qdrant_service.upsert_chunks(chunks, chunk_embeddings)
+    _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service)
 
     filename = os.path.basename(file_path)
     toc_records = [
@@ -278,33 +334,29 @@ def ingest_single_docx(file_path: str, embedding_service: EmbeddingService,
     if not chunks:
         return 0
 
-    chunk_texts = [c.text for c in chunks]
-    chunk_embeddings = embedding_service.embed_documents(chunk_texts)
-
-    qdrant_service.ensure_collection(vector_size=len(chunk_embeddings[0]))
-    qdrant_service.upsert_chunks(chunks, chunk_embeddings)
+    _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service)
 
     return len(chunks)
 
 
 def ingest_single_excel(file_path: str, embedding_service: EmbeddingService,
-                         qdrant_service: QdrantService) -> int:
-    """Ingest an .xlsx/.xlsm/.csv training-content file the same way
-    ingest_single_pdf ingests a PDF. Each sheet becomes one PageContent
-    (a CSV has exactly one implicit sheet); see ExcelParser.extract_pages.
+                         qdrant_service: QdrantService, restructure_llm=None) -> int:
+    """Ingest an .xlsx/.xlsm/.xls/.csv file through the shared RAG contract.
+
+    Each emitted PageContent is already a structured 20-30-row table chunk;
+    see ExcelParser.extract_pages.
     The sheet name is stored as toc_section so a query naming a sheet can
     be narrowed to it. Like .docx, there's no PDF-style page-level TOC
-    step here."""
-    parser = ExcelParser(excel_folder=settings.PDF_FOLDER)
-    chunks = parse_and_chunk(file_path, embedding_service, parser=parser)
+    step here.
+
+    ``restructure_llm`` is accepted for backward compatibility; structured
+    parsing itself is deterministic and requires no LLM call."""
+    parser = ExcelParser(excel_folder=settings.PDF_FOLDER, llm_service=restructure_llm)
+    chunks = parse_and_chunk(file_path, embedding_service, parser=parser, use_semantic_chunking=False)
     if not chunks:
         return 0
 
-    chunk_texts = [c.text for c in chunks]
-    chunk_embeddings = embedding_service.embed_documents(chunk_texts)
-
-    qdrant_service.ensure_collection(vector_size=len(chunk_embeddings[0]))
-    qdrant_service.upsert_chunks(chunks, chunk_embeddings)
+    _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service)
 
     return len(chunks)
 
@@ -525,11 +577,11 @@ with st.sidebar:
     st.header("📤 Upload a document")
     uploaded_file = st.file_uploader(
         "Choose a PDF, Word, Excel, or CSV document",
-        type=["pdf", "docx", "xlsx", "xlsm", "csv"],
+        type=["pdf", "docx", "xlsx", "xlsm", "xls", "csv"],
     )
 
     if uploaded_file is not None:
-        if st.button("Process & Summarize", type="primary", use_container_width=True):
+        if st.button("Process", type="primary", use_container_width=True):
             dest_path = os.path.join(settings.PDF_FOLDER, uploaded_file.name)
             already_ingested = os.path.isfile(dest_path)
             file_ext = os.path.splitext(uploaded_file.name)[1].lower()
@@ -546,39 +598,28 @@ with st.sidebar:
 
             embedding_service = get_embedding_service()
             qdrant_service = get_qdrant_service()
-            summary_llm = get_summary_llm()
 
             try:
                 if not already_ingested:
                     with st.spinner(f"Reading and indexing '{uploaded_file.name}'..."):
                         if file_ext == ".docx":
                             n_chunks = ingest_single_docx(dest_path, embedding_service, qdrant_service)
-                        elif file_ext in (".xlsx", ".xlsm", ".csv"):
-                            n_chunks = ingest_single_excel(dest_path, embedding_service, qdrant_service)
+                        elif file_ext in (".xlsx", ".xlsm", ".xls", ".csv"):
+                            n_chunks = ingest_single_excel(
+                                dest_path, embedding_service, qdrant_service
+                            )
                         else:
                             n_chunks = ingest_single_pdf(dest_path, embedding_service, qdrant_service)
                     if n_chunks == 0:
                         st.error("No extractable content found in this document.")
                         st.stop()
-                    st.toast(f"Indexed {n_chunks} chunks.", icon="✅")
-
-                with st.spinner("Generating summary..."):
-                    summary = summarize_indexed_document(
-                        uploaded_file.name,
-                        qdrant_service,
-                        summary_llm,
+                    st.success(
+                        f"Indexed {n_chunks} chunks from '{uploaded_file.name}'. "
+                        "Ask a question or request a summary in the chat below.",
+                        icon="✅",
                     )
-
-                with st.spinner("Coming up with follow-up questions..."):
-                    questions = generate_suggested_questions(summary_llm, summary, uploaded_file.name)
-
-                st.session_state.summary_text = summary
-                st.session_state.summary_filename = uploaded_file.name
-                st.session_state.suggested_questions = questions
-                st.session_state.summary_cache[uploaded_file.name] = {
-                    "summary": summary,
-                    "questions": questions,
-                }
+                else:
+                    st.info(f"'{uploaded_file.name}' is already indexed.", icon="ℹ️")
             except Exception as exc:
                 st.error(f"Something went wrong while processing the document: {exc}")
 

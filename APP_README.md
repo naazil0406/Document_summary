@@ -15,7 +15,7 @@ STORAGE:        Upload -> saved locally (data/pdfs/) AND mirrored to S3
 
 INGESTION:      PDF -> PyMuPDF + Docker Tesseract OCR (every page)
                 DOCX -> python-docx
-                XLSX/XLSM/CSV -> openpyxl / csv (one PageContent per sheet)
+                XLSX/XLSM/XLS/CSV -> structured 25-row table chunks
                 -> TOC-aware Document Chunking -> Semantic Chunking
                 -> BGE-M3 Embeddings -> Qdrant (Docker)
 
@@ -74,7 +74,7 @@ bot/
 ├── services/
 │   ├── pdf_parser.py          # PyMuPDF + mandatory Docker Tesseract OCR
 │   ├── docx_parser.py         # Word document parsing
-│   ├── excel_parser.py        # Excel (.xlsx/.xlsm) + CSV parsing, one PageContent per sheet
+│   ├── excel_parser.py        # Multi-sheet/table Excel + CSV structured parsing
 │   ├── chunking.py            # Stage 1: TOC-aware DocumentChunker
 │   │                          # Stage 2: SemanticChunkingService
 │   ├── embeddings.py          # BAAI/bge-m3 embeddings (documents + queries)

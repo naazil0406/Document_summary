@@ -90,6 +90,38 @@ class QdrantService:
             logger.error("Failed to upsert points into Qdrant: %s", exc)
             raise
 
+    def delete_document(self, filename: str) -> None:
+        """Remove all existing content/TOC points for one document.
+
+        Ingestion uses this before writing replacement chunks so re-indexing a
+        workbook cannot leave stale vectors from an older parsing strategy.
+        """
+        if not filename:
+            raise ValueError("filename is required")
+        selector = qdrant_models.FilterSelector(
+            filter=qdrant_models.Filter(
+                must=[
+                    qdrant_models.FieldCondition(
+                        key="filename",
+                        match=qdrant_models.MatchValue(value=filename),
+                    )
+                ]
+            )
+        )
+        try:
+            self.client.delete(
+                collection_name=self.collection_name,
+                points_selector=selector,
+                wait=True,
+            )
+            logger.info(
+                "Removed existing indexed points for document '%s'.",
+                filename,
+            )
+        except Exception as exc:
+            logger.error("Failed to replace indexed document '%s': %s", filename, exc)
+            raise
+
     def upsert_toc_entries(
         self,
         toc_entries: List[dict],

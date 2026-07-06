@@ -308,6 +308,11 @@ class DocumentChunker:
             return True
         if _HEADING_NUMBERED_RE.match(stripped):
             return True
+        if "|" in stripped and ":" in stripped:
+            return False
+        if re.fullmatch(r"[A-Za-z0-9\s._-]{1,40}", stripped) and len(stripped.split()) <= 3:
+            if re.search(r"\b(step|module|section|chapter|unit|part|lesson|topic)\b", stripped, re.IGNORECASE):
+                return True
         letters = [c for c in stripped if c.isalpha()]
         if letters and sum(1 for c in letters if c.isupper()) / len(letters) >= 0.80:
             if len(stripped) >= 4:
