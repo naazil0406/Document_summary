@@ -1,0 +1,1169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Chatbot — Document Intelligence</title>
+<style>
+/* ============================================================
+   Chatbot — Document Intelligence workspace
+   Design tokens
+   ============================================================ */
+:root {
+  --ink: #16211d;
+  --ink-soft: #24352e;
+  --ink-line: #33463d;
+  --paper: #f4efe1;
+  --paper-raised: #fbf8ef;
+  --paper-rule: #ddd3b4;
+  --ink-text: #2b332f;
+  --ink-text-soft: #5c6b63;
+  --gold: #b8862b;
+  --gold-deep: #93691d;
+  --slate: #3e5c6b;
+  --danger: #a3402f;
+  --radius: 10px;
+  --font-display: "Fraunces", serif;
+  --font-body: "IBM Plex Sans", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--paper);
+  color: var(--ink-text);
+  font-family: var(--font-body);
+}
+
+button { font-family: inherit; cursor: pointer; }
+
+/* ============================================================
+   App shell
+   ============================================================ */
+.app {
+  display: grid;
+  grid-template-columns: 272px 1fr;
+  min-height: 100vh;
+}
+
+@media (max-width: 860px) {
+  .app { grid-template-columns: 1fr; }
+  .rail { position: relative; }
+}
+
+/* ============================================================
+   Sidebar rail
+   ============================================================ */
+.rail {
+  background: var(--ink);
+  color: #e9e4d3;
+  padding: 28px 22px;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid #000;
+}
+
+.rail-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 34px;
+}
+
+.rail-brand-mark {
+  font-family: var(--font-display);
+  font-size: 30px;
+  color: var(--gold);
+  line-height: 1;
+}
+
+.rail-brand-name {
+  font-family: var(--font-display);
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.rail-brand-sub {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #9aa89c;
+}
+
+.rail-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.rail-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: none;
+  border: none;
+  color: #cdd6c6;
+  text-align: left;
+  font-size: 14.5px;
+  font-family: var(--font-body);
+  padding: 10px 12px;
+  border-radius: 7px;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.rail-nav-item:hover { background: rgba(255,255,255,0.05); color: #fff; }
+
+.rail-nav-item.is-active {
+  background: var(--ink-soft);
+  color: #fff;
+  font-weight: 500;
+}
+
+.rail-nav-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ink-line);
+  flex-shrink: 0;
+}
+
+.rail-nav-item.is-active .rail-nav-dot { background: var(--gold); }
+
+.rail-divider {
+  height: 1px;
+  background: var(--ink-line);
+  margin: 22px 0 16px;
+}
+
+.rail-section-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #7f8f81;
+  margin-bottom: 10px;
+}
+
+.rail-docs {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 40px;
+}
+
+.rail-doc-empty, .doc-grid-empty, .thread-empty-sub, .transcript-empty {
+  color: #8b9a8d;
+  font-size: 13px;
+}
+
+.rail-doc {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12.5px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  color: #d8dfcf;
+}
+
+.rail-doc:hover { background: rgba(255,255,255,0.04); }
+
+.rail-doc-name {
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rail-doc-ext {
+  color: var(--gold);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.rail-status {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--ink-line);
+  font-size: 12px;
+  color: #9aa89c;
+}
+
+.rail-status-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 3px 0;
+}
+
+.rail-status-row span:last-child {
+  font-family: var(--font-mono);
+  color: #d8dfcf;
+}
+
+/* ============================================================
+   Canvas / panels
+   ============================================================ */
+.canvas {
+  padding: 40px 56px;
+  overflow-y: auto;
+  max-height: 100vh;
+}
+
+.panel { display: none; max-width: 760px; }
+.panel.is-active { display: block; animation: rise 0.25s ease; }
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.panel-head { margin-bottom: 28px; }
+
+.panel-head h1 {
+  font-family: var(--font-display);
+  font-size: 30px;
+  font-weight: 600;
+  margin: 0 0 8px;
+  color: var(--ink);
+}
+
+.panel-head p {
+  font-size: 14.5px;
+  color: var(--ink-text-soft);
+  max-width: 560px;
+  line-height: 1.5;
+  margin: 0 0 14px;
+}
+
+.section-title {
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 600;
+  margin: 34px 0 14px;
+  color: var(--ink);
+}
+
+/* ============================================================
+   Buttons
+   ============================================================ */
+.primary-btn {
+  background: var(--gold);
+  color: #201404;
+  border: none;
+  font-weight: 600;
+  font-size: 13.5px;
+  padding: 10px 18px;
+  border-radius: 7px;
+  transition: background 0.15s ease, transform 0.1s ease;
+}
+.primary-btn:hover { background: var(--gold-deep); }
+.primary-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.primary-btn:active { transform: scale(0.98); }
+
+.ghost-btn {
+  background: none;
+  border: 1px solid var(--paper-rule);
+  color: var(--ink-text-soft);
+  font-size: 12.5px;
+  padding: 7px 12px;
+  border-radius: 7px;
+  text-decoration: none;
+  display: inline-block;
+}
+.ghost-btn:hover { border-color: var(--slate); color: var(--slate); }
+
+/* ============================================================
+   Chat panel
+   ============================================================ */
+.thread {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 240px;
+  padding-bottom: 20px;
+}
+
+.thread-empty {
+  border: 1px dashed var(--paper-rule);
+  border-radius: var(--radius);
+  padding: 30px 24px;
+  text-align: center;
+  color: var(--ink-text-soft);
+}
+
+.msg {
+  max-width: 78%;
+  padding: 12px 15px;
+  border-radius: 12px;
+  font-size: 14.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.msg.user {
+  align-self: flex-end;
+  background: var(--ink);
+  color: #f1ecd9;
+  border-bottom-right-radius: 3px;
+}
+
+.msg.assistant {
+  align-self: flex-start;
+  background: var(--paper-raised);
+  border: 1px solid var(--paper-rule);
+  border-bottom-left-radius: 3px;
+}
+
+.msg.assistant::before {
+  content: "";
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--gold);
+  margin-right: 7px;
+  vertical-align: middle;
+}
+
+.msg.pending { opacity: 0.55; }
+
+.composer {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  gap: 10px;
+  background: var(--paper);
+  padding: 14px 0 4px;
+}
+
+.composer input {
+  flex: 1;
+  font-family: var(--font-body);
+  font-size: 14.5px;
+  padding: 12px 14px;
+  border-radius: 9px;
+  border: 1px solid var(--paper-rule);
+  background: var(--paper-raised);
+  color: var(--ink-text);
+}
+.composer input:focus { outline: 2px solid var(--gold); outline-offset: 1px; }
+
+.composer button {
+  background: var(--ink);
+  color: #f1ecd9;
+  border: none;
+  border-radius: 9px;
+  padding: 0 22px;
+  font-size: 14px;
+  font-weight: 500;
+}
+.composer button:hover { background: var(--ink-soft); }
+.composer button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Summary card */
+.summary-card {
+  background: var(--paper-raised);
+  border: 1px solid var(--paper-rule);
+  border-left: 3px solid var(--gold);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  margin-bottom: 20px;
+}
+.summary-card-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.summary-card-tag {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--gold-deep);
+  background: rgba(184,134,43,0.12);
+  padding: 2px 7px;
+  border-radius: 4px;
+}
+.summary-card-file { font-family: var(--font-mono); font-size: 12.5px; color: var(--ink-text-soft); }
+.summary-card-text { font-size: 14px; line-height: 1.55; margin: 0 0 12px; }
+.summary-card-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.summary-card-chips button {
+  background: none;
+  border: 1px solid var(--paper-rule);
+  border-radius: 20px;
+  font-size: 12.5px;
+  padding: 6px 12px;
+  color: var(--slate);
+}
+.summary-card-chips button:hover { border-color: var(--slate); background: rgba(62,92,107,0.06); }
+
+/* ============================================================
+   Upload panel
+   ============================================================ */
+.dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1.5px dashed var(--paper-rule);
+  border-radius: var(--radius);
+  padding: 48px 20px;
+  text-align: center;
+  cursor: pointer;
+  background: var(--paper-raised);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.dropzone:hover, .dropzone.is-dragover { border-color: var(--gold); background: #fdf9ec; }
+.dropzone-icon { font-size: 26px; color: var(--gold-deep); font-family: var(--font-display); }
+.dropzone-title { font-weight: 500; font-size: 15px; color: var(--ink); }
+.dropzone-sub { font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-text-soft); }
+
+.upload-pending {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 14px;
+  padding: 10px 14px;
+  background: var(--paper-raised);
+  border: 1px solid var(--paper-rule);
+  border-radius: 8px;
+}
+.upload-pending span { font-family: var(--font-mono); font-size: 13px; }
+
+.upload-log { margin-top: 14px; display: flex; flex-direction: column; gap: 6px; }
+.log-line { font-size: 13px; padding: 8px 12px; border-radius: 7px; }
+.log-line.ok { background: rgba(62,92,107,0.08); color: var(--slate); }
+.log-line.err { background: rgba(163,64,47,0.08); color: var(--danger); }
+.log-line.info { background: rgba(184,134,43,0.08); color: var(--gold-deep); }
+
+/* Doc grid — index cards */
+.doc-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+}
+.doc-grid-empty { color: var(--ink-text-soft); font-size: 13.5px; }
+
+.doc-card {
+  background: var(--paper-raised);
+  border: 1px solid var(--paper-rule);
+  border-radius: 9px;
+  padding: 14px;
+  position: relative;
+}
+.doc-card::after {
+  content: attr(data-ext);
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--gold-deep);
+  border: 1px solid var(--paper-rule);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.doc-card-name {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  word-break: break-word;
+  padding-right: 34px;
+  margin-bottom: 10px;
+  color: var(--ink-text);
+}
+.doc-card-actions { display: flex; gap: 8px; }
+.doc-card-actions button {
+  background: none;
+  border: none;
+  font-size: 12px;
+  color: var(--slate);
+  padding: 0;
+}
+.doc-card-actions button:hover { text-decoration: underline; }
+.doc-card-actions button.danger { color: var(--danger); }
+
+/* ============================================================
+   AWS Sync panel
+   ============================================================ */
+.sync-card {
+  background: var(--paper-raised);
+  border: 1px solid var(--paper-rule);
+  border-radius: var(--radius);
+  padding: 20px;
+}
+.sync-card-row { display: flex; align-items: center; justify-content: space-between; }
+.sync-card-label { font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-text-soft); }
+.sync-card-value { font-family: var(--font-mono); font-size: 15px; margin-top: 4px; }
+.sync-card-log { margin-top: 14px; display: flex; flex-direction: column; gap: 6px; }
+
+.hint-card {
+  margin-top: 18px;
+  font-size: 13px;
+  color: var(--ink-text-soft);
+  background: rgba(184,134,43,0.06);
+  border: 1px solid rgba(184,134,43,0.25);
+  border-radius: 8px;
+  padding: 12px 14px;
+  line-height: 1.5;
+}
+.hint-card code {
+  font-family: var(--font-mono);
+  background: rgba(0,0,0,0.05);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+/* ============================================================
+   Transcript panel
+   ============================================================ */
+#panel-transcript.panel.is-active {
+  display: grid;
+  grid-template-columns: 1fr 300px;
+  gap: 32px;
+  max-width: 1040px;
+  align-items: start;
+}
+#panel-transcript .panel-head { grid-column: 1 / -1; margin-bottom: 0; }
+#panel-transcript .transcript-main { min-width: 0; }
+
+@media (max-width: 860px) {
+  #panel-transcript.panel.is-active { grid-template-columns: 1fr; }
+}
+
+.transcript-rail {
+  border-left: 1px solid var(--paper-rule);
+  padding-left: 24px;
+}
+.transcript-rail-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-text-soft);
+  margin-bottom: 12px;
+}
+.transcript-rail-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+.transcript-rail-empty {
+  font-size: 13px;
+  color: var(--ink-text-soft);
+}
+.transcript-rail-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: var(--paper-raised);
+  border: 1px solid var(--paper-rule);
+  border-radius: 8px;
+  padding: 10px 12px;
+  cursor: pointer;
+}
+.transcript-rail-item:hover { border-color: var(--slate); }
+.transcript-rail-item.is-active {
+  border-color: var(--gold);
+  background: rgba(184,134,43,0.08);
+}
+.transcript-rail-item-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.transcript-rail-item-time {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-text-soft);
+  margin-top: 2px;
+}
+
+.transcript-empty {
+  border: 1px dashed var(--paper-rule);
+  border-radius: var(--radius);
+  padding: 30px 24px;
+  text-align: center;
+}
+
+.transcript-card {
+  background: var(--paper-raised);
+  border: 1px solid var(--paper-rule);
+  border-radius: var(--radius);
+  padding: 18px 20px;
+}
+.transcript-card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.transcript-card-tag {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--gold-deep);
+  background: rgba(184,134,43,0.12);
+  padding: 2px 7px;
+  border-radius: 4px;
+}
+.transcript-card-text {
+  font-family: var(--font-body);
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  margin: 0;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+</style>
+</head>
+<body>
+
+<div class="app">
+
+  <!-- ============================== SIDEBAR ============================== -->
+  <aside class="rail">
+    <div class="rail-brand">
+      <span class="rail-brand-mark">§</span>
+      <div>
+        <div class="rail-brand-name">Chatbot</div>
+        <div class="rail-brand-sub">Document Intelligence</div>
+      </div>
+    </div>
+
+    <nav class="rail-nav" id="nav">
+      <button class="rail-nav-item is-active" data-panel="chat">
+        <span class="rail-nav-dot"></span>Chat
+      </button>
+      <button class="rail-nav-item" data-panel="upload">
+        <span class="rail-nav-dot"></span>Upload
+      </button>
+      <button class="rail-nav-item" data-panel="sync">
+        <span class="rail-nav-dot"></span>AWS Sync
+      </button>
+      <button class="rail-nav-item" data-panel="transcript">
+        <span class="rail-nav-dot"></span>Transcript
+      </button>
+    </nav>
+
+    <div class="rail-divider"></div>
+
+    <div class="rail-section-label">Indexed documents</div>
+    <div class="rail-docs" id="railDocs">
+      <div class="rail-doc-empty">No documents yet.</div>
+    </div>
+
+    <div class="rail-status" id="railStatus">
+      <div class="rail-status-row"><span>LLM</span><span id="statusLlm">—</span></div>
+      <div class="rail-status-row"><span>S3 sync</span><span id="statusS3">—</span></div>
+    </div>
+  </aside>
+
+  <!-- ============================== MAIN ============================== -->
+  <main class="canvas">
+
+    <!-- ---------- CHAT PANEL ---------- -->
+    <section class="panel is-active" id="panel-chat">
+      <header class="panel-head">
+        <h1>Chat with your documents</h1>
+        <p>Ask a question, or ask for a summary — Chatbot will decide which and cite the source file.</p>
+        <button class="ghost-btn" id="clearChatBtn">Clear conversation</button>
+      </header>
+
+      <div class="summary-card" id="summaryCard" hidden>
+        <div class="summary-card-head">
+          <span class="summary-card-tag">Summary</span>
+          <span class="summary-card-file" id="summaryCardFile"></span>
+        </div>
+        <p class="summary-card-text" id="summaryCardText"></p>
+        <div class="summary-card-chips" id="summaryCardChips"></div>
+      </div>
+
+      <div class="thread" id="thread">
+        <div class="thread-empty" id="threadEmpty">
+          <p>Nothing here yet.</p>
+          <p class="thread-empty-sub">Upload a document, then ask something like "summarize safety_manual.pdf" or "what's the refund policy?"</p>
+        </div>
+      </div>
+
+      <form class="composer" id="composerForm">
+        <input type="text" id="composerInput" placeholder="Ask a question about your documents…" autocomplete="off" />
+        <button type="submit" id="composerSend">Send</button>
+      </form>
+    </section>
+
+    <!-- ---------- UPLOAD PANEL ---------- -->
+    <section class="panel" id="panel-upload">
+      <header class="panel-head">
+        <h1>Upload a document</h1>
+        <p>PDF, Word, Excel, or CSV. Each file is parsed, chunked, embedded, and indexed for search — then mirrored to S3 if configured.</p>
+      </header>
+
+      <label class="dropzone" id="dropzone" for="fileInput">
+        <input type="file" id="fileInput" accept=".pdf,.docx,.xlsx,.xlsm,.xls,.csv" hidden />
+        <div class="dropzone-icon">＋</div>
+        <div class="dropzone-title">Drop a file here, or click to browse</div>
+        <div class="dropzone-sub">.pdf · .docx · .xlsx · .xlsm · .xls · .csv</div>
+      </label>
+
+      <div class="upload-pending" id="uploadPending" hidden>
+        <span id="uploadPendingName"></span>
+        <button id="uploadPendingBtn" class="primary-btn">Process document</button>
+      </div>
+
+      <div class="upload-log" id="uploadLog"></div>
+
+      <h2 class="section-title">Library</h2>
+      <div class="doc-grid" id="docGrid">
+        <div class="doc-grid-empty">Nothing indexed yet — the first upload starts your library.</div>
+      </div>
+    </section>
+
+    <!-- ---------- AWS SYNC PANEL ---------- -->
+    <section class="panel" id="panel-sync">
+      <header class="panel-head">
+        <h1>AWS S3 sync</h1>
+        <p>S3 is the durable copy of your library. Uploads are mirrored there automatically; use this to pull down anything that exists in S3 but isn't on this machine yet.</p>
+      </header>
+
+      <div class="sync-card">
+        <div class="sync-card-row">
+          <div>
+            <div class="sync-card-label">Bucket status</div>
+            <div class="sync-card-value" id="syncBucketStatus">Checking…</div>
+          </div>
+          <button class="primary-btn" id="syncBtn">Sync from S3</button>
+        </div>
+        <div class="sync-card-log" id="syncLog"></div>
+      </div>
+
+      <div class="hint-card">
+        <strong>Not configured?</strong> Set <code>S3_BUCKET_NAME</code> (and optionally
+        <code>AWS_ACCESS_KEY_ID</code> / <code>AWS_SECRET_ACCESS_KEY</code>) in <code>.env</code>
+        to enable this. Without it, documents live on local disk only.
+      </div>
+    </section>
+
+    <!-- ---------- TRANSCRIPT PANEL ---------- -->
+    <section class="panel" id="panel-transcript">
+      <header class="panel-head">
+        <h1>Generate a training transcript</h1>
+        <p>Weaves everything in your library into a single narrated training script. The format stays fixed; the story is freshly invented on every run — each run is saved below so you can revisit earlier ones.</p>
+        <button class="primary-btn" id="generateTranscriptBtn">Generate transcript</button>
+      </header>
+
+      <div class="transcript-main">
+        <div class="transcript-empty" id="transcriptEmpty">
+          <p>No transcript generated yet this session.</p>
+        </div>
+
+        <article class="transcript-card" id="transcriptCard" hidden>
+          <div class="transcript-card-head">
+            <span class="transcript-card-tag" id="transcriptCardTag">Transcript</span>
+            <a href="#" class="ghost-btn" id="transcriptDownload">Download .txt</a>
+          </div>
+          <pre class="transcript-card-text" id="transcriptText"></pre>
+        </article>
+      </div>
+
+      <aside class="transcript-rail">
+        <div class="transcript-rail-title">Generated transcripts</div>
+        <div class="transcript-rail-list" id="transcriptList">
+          <div class="transcript-rail-empty">Nothing generated yet.</div>
+        </div>
+      </aside>
+    </section>
+
+  </main>
+</div>
+
+<script>
+/* Live build — wired to the FastAPI backend in main.py (same origin). */
+
+(() => {
+  "use strict";
+
+  const API = ""; // same-origin; change to e.g. "http://localhost:8000" if served separately
+
+  // ---- Navigation ----
+  const navButtons = document.querySelectorAll(".rail-nav-item");
+  navButtons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      navButtons.forEach((b) => b.classList.remove("is-active"));
+      btn.classList.add("is-active");
+      document.querySelectorAll(".panel").forEach((p) => p.classList.remove("is-active"));
+      document.getElementById("panel-" + btn.dataset.panel).classList.add("is-active");
+      if (btn.dataset.panel === "sync") refreshSyncStatus();
+    });
+  });
+
+  function escapeHtml(str) {
+    const div = document.createElement("div");
+    div.textContent = str;
+    return div.innerHTML;
+  }
+  function extOf(name) {
+    const parts = name.split(".");
+    return parts.length > 1 ? parts.pop().toUpperCase() : "";
+  }
+
+  async function api(path, options) {
+    const res = await fetch(API + path, options);
+    let body = null;
+    try { body = await res.json(); } catch (_) { /* no body */ }
+    if (!res.ok) {
+      const detail = (body && body.detail) ? body.detail : res.statusText;
+      throw new Error(detail);
+    }
+    return body;
+  }
+
+  // ---- Elements ----
+  const railDocs = document.getElementById("railDocs");
+  const docGrid = document.getElementById("docGrid");
+  const thread = document.getElementById("thread");
+  const threadEmpty = document.getElementById("threadEmpty");
+  const summaryCard = document.getElementById("summaryCard");
+  const uploadLog = document.getElementById("uploadLog");
+  const syncLog = document.getElementById("syncLog");
+
+  function addMsg(role, text) {
+    threadEmpty.style.display = "none";
+    const el = document.createElement("div");
+    el.className = "msg " + role;
+    el.textContent = text;
+    thread.appendChild(el);
+    thread.scrollTop = thread.scrollHeight;
+    return el;
+  }
+
+  function logLine(container, text, kind) {
+    const el = document.createElement("div");
+    el.className = "log-line " + (kind || "info");
+    el.textContent = text;
+    container.prepend(el);
+  }
+
+  function showSummaryCard(filename, summaryText, questions) {
+    summaryCard.hidden = false;
+    document.getElementById("summaryCardFile").textContent = filename;
+    document.getElementById("summaryCardText").textContent = summaryText;
+    const chips = document.getElementById("summaryCardChips");
+    chips.innerHTML = "";
+    (questions || []).forEach((q) => {
+      const chip = document.createElement("button");
+      chip.textContent = q;
+      chip.addEventListener("click", () => askQuestion(q));
+      chips.appendChild(chip);
+    });
+  }
+
+  // ---- Documents (rail + library grid) ----
+  async function refreshDocuments() {
+    let docs = [];
+    try {
+      const data = await api("/api/documents");
+      docs = data.documents || [];
+    } catch (exc) {
+      railDocs.innerHTML = `<div class="rail-doc-empty">Could not load documents.</div>`;
+      docGrid.innerHTML = `<div class="doc-grid-empty">Could not load documents: ${escapeHtml(exc.message)}</div>`;
+      return;
+    }
+
+    railDocs.innerHTML = docs.length
+      ? docs.map((d) => `<div class="rail-doc"><span class="rail-doc-name">${escapeHtml(d)}</span><span class="rail-doc-ext">${extOf(d)}</span></div>`).join("")
+      : `<div class="rail-doc-empty">No documents yet.</div>`;
+
+    docGrid.innerHTML = docs.length
+      ? docs.map((d) => `
+          <div class="doc-card" data-ext="${extOf(d)}" data-filename="${escapeHtml(d)}">
+            <div class="doc-card-name">${escapeHtml(d)}</div>
+            <div class="doc-card-actions">
+              <button data-action="summarize">Summarize</button>
+              <button data-action="delete" class="danger">Remove</button>
+            </div>
+          </div>`).join("")
+      : `<div class="doc-grid-empty">Nothing indexed yet — the first upload starts your library.</div>`;
+  }
+
+  docGrid.addEventListener("click", async (e) => {
+    const btn = e.target.closest("button[data-action]");
+    if (!btn) return;
+    const card = btn.closest(".doc-card");
+    const filename = card.dataset.filename;
+
+    if (btn.dataset.action === "summarize") {
+      btn.disabled = true;
+      btn.textContent = "Summarizing…";
+      try {
+        const data = await api(`/api/documents/${encodeURIComponent(filename)}/summarize`, { method: "POST" });
+        showSummaryCard(data.filename, data.summary, data.questions);
+        document.querySelector('.rail-nav-item[data-panel="chat"]').click();
+      } catch (exc) {
+        alert("Could not summarize: " + exc.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "Summarize";
+      }
+    } else if (btn.dataset.action === "delete") {
+      if (!confirm(`Remove "${filename}" from the library?`)) return;
+      try {
+        await api(`/api/documents/${encodeURIComponent(filename)}`, { method: "DELETE" });
+        await refreshDocuments();
+      } catch (exc) {
+        alert("Could not remove: " + exc.message);
+      }
+    }
+  });
+
+  // ---- Status ----
+  async function refreshStatus() {
+    try {
+      const data = await api("/api/status");
+      document.getElementById("statusLlm").textContent = data.llm_provider;
+      document.getElementById("statusS3").textContent = data.s3_enabled ? "enabled" : "disabled";
+    } catch (exc) {
+      document.getElementById("statusLlm").textContent = "unavailable";
+      document.getElementById("statusS3").textContent = "unavailable";
+    }
+  }
+
+  async function refreshSyncStatus() {
+    const el = document.getElementById("syncBucketStatus");
+    try {
+      const data = await api("/api/status");
+      el.textContent = data.s3_enabled ? `Connected — s3://${data.s3_bucket}` : "Not configured";
+      document.getElementById("syncBtn").disabled = !data.s3_enabled;
+    } catch (exc) {
+      el.textContent = "Could not check status";
+    }
+  }
+
+  // ---- Chat ----
+  async function askQuestion(question) {
+    addMsg("user", question);
+    const pending = addMsg("assistant", "Thinking…");
+    pending.classList.add("pending");
+    try {
+      const data = await api("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question }),
+      });
+      pending.classList.remove("pending");
+      pending.textContent = data.answer;
+      if (data.type === "summary" && data.filename) {
+        showSummaryCard(data.filename, data.answer, data.questions);
+      }
+    } catch (exc) {
+      pending.classList.remove("pending");
+      pending.textContent = "An error occurred: " + exc.message;
+    }
+  }
+
+  document.getElementById("composerForm").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const input = document.getElementById("composerInput");
+    const q = input.value.trim();
+    if (!q) return;
+    input.value = "";
+    askQuestion(q);
+  });
+
+  document.getElementById("clearChatBtn").addEventListener("click", () => {
+    thread.innerHTML = "";
+    thread.appendChild(threadEmpty);
+    threadEmpty.style.display = "";
+    summaryCard.hidden = true;
+  });
+
+  // ---- Upload ----
+  const fileInput = document.getElementById("fileInput");
+  const dropzone = document.getElementById("dropzone");
+  const uploadPending = document.getElementById("uploadPending");
+  const uploadPendingName = document.getElementById("uploadPendingName");
+  const uploadPendingBtn = document.getElementById("uploadPendingBtn");
+
+  fileInput.addEventListener("change", () => {
+    if (fileInput.files[0]) {
+      uploadPendingName.textContent = fileInput.files[0].name;
+      uploadPending.hidden = false;
+    }
+  });
+  ["dragover", "dragenter"].forEach((evt) =>
+    dropzone.addEventListener(evt, (e) => { e.preventDefault(); dropzone.classList.add("is-dragover"); })
+  );
+  ["dragleave"].forEach((evt) =>
+    dropzone.addEventListener(evt, (e) => { e.preventDefault(); dropzone.classList.remove("is-dragover"); })
+  );
+  dropzone.addEventListener("drop", (e) => {
+    e.preventDefault();
+    dropzone.classList.remove("is-dragover");
+    if (e.dataTransfer.files[0]) {
+      fileInput.files = e.dataTransfer.files;
+      fileInput.dispatchEvent(new Event("change"));
+    }
+  });
+
+  uploadPendingBtn.addEventListener("click", async (e) => {
+    e.preventDefault();
+    const file = fileInput.files[0];
+    if (!file) return;
+
+    uploadPendingBtn.disabled = true;
+    uploadPendingBtn.textContent = "Processing…";
+    const formData = new FormData();
+    formData.append("file", file);
+
+    try {
+      const data = await api("/api/documents/upload", { method: "POST", body: formData });
+      if (data.already_indexed) {
+        logLine(uploadLog, `"${data.filename}" is already indexed.`, "info");
+      } else {
+        logLine(uploadLog, `Indexed ${data.chunks} chunks from "${data.filename}".`, "ok");
+      }
+      if (data.s3_uri) logLine(uploadLog, `Backed up to ${data.s3_uri}`, "info");
+      if (data.s3_warning) logLine(uploadLog, data.s3_warning, "err");
+      await refreshDocuments();
+    } catch (exc) {
+      logLine(uploadLog, "Upload failed: " + exc.message, "err");
+    } finally {
+      uploadPendingBtn.disabled = false;
+      uploadPendingBtn.textContent = "Process document";
+      uploadPending.hidden = true;
+      fileInput.value = "";
+    }
+  });
+
+  // ---- AWS Sync ----
+  document.getElementById("syncBtn").addEventListener("click", async (e) => {
+    e.preventDefault();
+    const btn = e.target;
+    btn.disabled = true;
+    btn.textContent = "Syncing…";
+    try {
+      const data = await api("/api/sync", { method: "POST" });
+      if (data.up_to_date) {
+        logLine(syncLog, "Already up to date with S3.", "info");
+      } else {
+        if (data.downloaded.length) logLine(syncLog, `Fetched ${data.downloaded.length} document(s) from S3.`, "ok");
+        if (data.indexed.length) logLine(syncLog, `Indexed: ${data.indexed.join(", ")}`, "ok");
+      }
+      Object.entries(data.errors || {}).forEach(([name, err]) => {
+        logLine(syncLog, `Could not index "${name}": ${err}`, "err");
+      });
+      await refreshDocuments();
+    } catch (exc) {
+      logLine(syncLog, "Sync failed: " + exc.message, "err");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Sync from S3";
+    }
+  });
+
+  // ---- Transcript ----
+  const transcriptList = document.getElementById("transcriptList");
+  const transcriptEmpty = document.getElementById("transcriptEmpty");
+  const transcriptCard = document.getElementById("transcriptCard");
+  let activeTranscriptId = null;
+
+  function formatTime(iso) {
+    try {
+      return new Date(iso).toLocaleString([], {
+        month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
+      });
+    } catch (_) {
+      return iso;
+    }
+  }
+
+  function renderTranscript(entry) {
+    activeTranscriptId = entry.id;
+    transcriptEmpty.hidden = true;
+    transcriptCard.hidden = false;
+    document.getElementById("transcriptCardTag").textContent = entry.label;
+    document.getElementById("transcriptText").textContent = entry.script;
+
+    const dl = document.getElementById("transcriptDownload");
+    const blob = new Blob([entry.script], { type: "text/plain" });
+    dl.href = URL.createObjectURL(blob);
+    dl.download = `${entry.label.replace(/\s+/g, "_")}.txt`;
+    dl.onclick = null;
+
+    document.querySelectorAll(".transcript-rail-item").forEach((el) => {
+      el.classList.toggle("is-active", el.dataset.id === entry.id);
+    });
+  }
+
+  async function selectTranscript(id) {
+    try {
+      const entry = await api(`/api/transcripts/${encodeURIComponent(id)}`);
+      renderTranscript(entry);
+    } catch (exc) {
+      alert("Could not load transcript: " + exc.message);
+    }
+  }
+
+  function renderTranscriptList(items) {
+    if (!items.length) {
+      transcriptList.innerHTML = `<div class="transcript-rail-empty">Nothing generated yet.</div>`;
+      return;
+    }
+    transcriptList.innerHTML = items
+      .slice()
+      .reverse()
+      .map(
+        (t) => `
+          <button class="transcript-rail-item${t.id === activeTranscriptId ? " is-active" : ""}" data-id="${t.id}">
+            <div class="transcript-rail-item-label">${escapeHtml(t.label)}</div>
+            <div class="transcript-rail-item-time">${escapeHtml(formatTime(t.created_at))}</div>
+          </button>`
+      )
+      .join("");
+
+    transcriptList.querySelectorAll(".transcript-rail-item").forEach((btn) => {
+      btn.addEventListener("click", () => selectTranscript(btn.dataset.id));
+    });
+  }
+
+  async function refreshTranscriptList() {
+    try {
+      const data = await api("/api/transcripts");
+      renderTranscriptList(data.transcripts || []);
+    } catch (exc) {
+      transcriptList.innerHTML = `<div class="transcript-rail-empty">Could not load list.</div>`;
+    }
+  }
+
+  document.getElementById("generateTranscriptBtn").addEventListener("click", async (e) => {
+    e.preventDefault();
+    const btn = e.target;
+    btn.disabled = true;
+    btn.textContent = "Generating…";
+    try {
+      const entry = await api("/api/transcript", { method: "POST" });
+      await refreshTranscriptList();
+      renderTranscript(entry);
+    } catch (exc) {
+      alert("Could not generate transcript: " + exc.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Generate transcript";
+    }
+  });
+
+  refreshTranscriptList();
+
+  // ---- Init ----
+  refreshStatus();
+  refreshDocuments();
+})();
+
+</script>
+</body>
+</html>
