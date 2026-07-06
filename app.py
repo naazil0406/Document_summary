@@ -361,6 +361,53 @@ def ingest_single_excel(file_path: str, embedding_service: EmbeddingService,
     return len(chunks)
 
 
+def ingest_document_by_extension(
+    dest_path: str,
+    embedding_service: EmbeddingService,
+    qdrant_service: QdrantService,
+) -> int:
+    """Dispatch a single file to the right ingest_single_* function based on
+    its extension. Shared by the manual upload button and the S3 sync flow
+    so both paths stay in sync as new extensions are added.
+    Supports: .pdf, .docx, .xlsx, .xlsm, .xls, .csv
+    """
+    file_ext = os.path.splitext(dest_path)[1].lower()
+
+    if file_ext == ".docx":
+        return ingest_single_docx(dest_path, embedding_service, qdrant_service)
+    elif file_ext in (".xlsx", ".xlsm", ".xls", ".csv"):
+        return ingest_single_excel(dest_path, embedding_service, qdrant_service)
+    elif file_ext == ".pdf":
+        return ingest_single_pdf(dest_path, embedding_service, qdrant_service)
+    else:
+        logger.warning("Skipping '%s': unsupported extension '%s'.", dest_path, file_ext)
+        return 0
+
+
+def files_needing_ingestion(filenames: list, qdrant_service: QdrantService) -> list:
+    """Filter filenames down to those with no chunks yet indexed in Qdrant.
+
+    Covers two cases at once: files just downloaded by sync_down() (never
+    indexed), and files that were already sitting in the local folder from
+    an earlier sync but never made it into Qdrant (e.g. ingestion failed
+    previously, or the collection was reset). retrieve_document() is a
+    read-only payload scroll, so this never re-parses/re-embeds anything.
+
+    If the Qdrant collection doesn't exist yet at all, every file needs
+    ingestion — that lookup failure is treated as "not indexed" rather
+    than surfaced as an error here.
+    """
+    pending = []
+    for filename in filenames:
+        try:
+            already_indexed = bool(qdrant_service.retrieve_document(filename))
+        except Exception:
+            already_indexed = False
+        if not already_indexed:
+            pending.append(filename)
+    return pending
+
+
 # ---------------------------------------------------------------------------
 # Summarization after upload: read the chunks already persisted in Qdrant.
 # ---------------------------------------------------------------------------
@@ -534,21 +581,11 @@ os.makedirs(settings.PDF_FOLDER, exist_ok=True)
 
 s3_storage = get_s3_storage()
 
-# Pull down anything that's in S3 but not yet in the local working folder
-# (fresh checkout, restarted container, another machine's upload, etc.).
-# Only done once per session — not on every rerun — since it's a network
-# call; a manual "Sync from S3" button in the sidebar covers refreshing
-# mid-session without needing to restart the app.
-st.session_state.setdefault("s3_synced", False)
-if s3_storage and not st.session_state.s3_synced:
-    try:
-        with st.spinner("Fetching documents from S3..."):
-            downloaded = s3_storage.sync_down(settings.PDF_FOLDER)
-        if downloaded:
-            st.toast(f"Fetched {len(downloaded)} document(s) from S3.", icon="📦")
-    except Exception as exc:
-        st.warning(f"Could not sync from S3: {exc}", icon="⚠️")
-    st.session_state.s3_synced = True
+# S3 sync (download + extract + chunk + embed) only runs when the user
+# explicitly clicks "🔄 Sync from S3" in the sidebar -- see that button's
+# handler below. Nothing here runs automatically on startup/restart, so
+# opening or restarting the app never triggers a network call or loads
+# the embedding model on its own.
 
 
 def _existing_documents():
@@ -566,11 +603,38 @@ with st.sidebar:
             try:
                 with st.spinner("Fetching documents from S3..."):
                     downloaded = s3_storage.sync_down(settings.PDF_FOLDER)
-                st.toast(
-                    f"Fetched {len(downloaded)} new document(s) from S3."
-                    if downloaded else "Already up to date with S3.",
-                    icon="📦",
-                )
+
+                local_files = [
+                    f for f in os.listdir(settings.PDF_FOLDER) if f.lower().endswith(SUPPORTED_EXTENSIONS)
+                ]
+                embedding_service = get_embedding_service()
+                qdrant_service = get_qdrant_service()
+                pending = files_needing_ingestion(local_files, qdrant_service)
+
+                if pending:
+                    progress_placeholder = st.empty()
+                    for i, filename in enumerate(pending, start=1):
+                        progress_placeholder.info(
+                            f"Indexing {i}/{len(pending)}: '{filename}'...", icon="⏳"
+                        )
+                        dest_path = os.path.join(settings.PDF_FOLDER, filename)
+                        try:
+                            ingest_document_by_extension(dest_path, embedding_service, qdrant_service)
+                        except Exception as exc:
+                            st.warning(f"Could not index '{filename}': {exc}", icon="⚠️")
+                    progress_placeholder.empty()
+
+                if downloaded and pending:
+                    st.toast(
+                        f"Fetched {len(downloaded)} new document(s) and indexed {len(pending)}.",
+                        icon="✅",
+                    )
+                elif pending:
+                    st.toast(f"Indexed {len(pending)} previously un-indexed document(s).", icon="✅")
+                elif downloaded:
+                    st.toast(f"Fetched {len(downloaded)} new document(s) from S3.", icon="📦")
+                else:
+                    st.toast("Already up to date with S3.", icon="📦")
             except Exception as exc:
                 st.warning(f"Could not sync from S3: {exc}", icon="⚠️")
 
@@ -583,11 +647,21 @@ with st.sidebar:
     if uploaded_file is not None:
         if st.button("Process", type="primary", use_container_width=True):
             dest_path = os.path.join(settings.PDF_FOLDER, uploaded_file.name)
-            already_ingested = os.path.isfile(dest_path)
-            file_ext = os.path.splitext(uploaded_file.name)[1].lower()
 
             with open(dest_path, "wb") as f:
                 f.write(uploaded_file.getbuffer())
+
+            embedding_service = get_embedding_service()
+            qdrant_service = get_qdrant_service()
+
+            # Qdrant-aware check (same as files_needing_ingestion used in the
+            # S3 sync flow) rather than just "does the file exist on disk" --
+            # a file can exist locally but have never made it into Qdrant
+            # (e.g. a previous ingestion attempt failed, or the collection
+            # was reset), in which case it still needs to be chunked.
+            already_ingested = uploaded_file.name not in files_needing_ingestion(
+                [uploaded_file.name], qdrant_service
+            )
 
             if s3_storage:
                 try:
@@ -596,20 +670,12 @@ with st.sidebar:
                 except Exception as exc:
                     st.warning(f"Saved locally, but S3 upload failed: {exc}", icon="⚠️")
 
-            embedding_service = get_embedding_service()
-            qdrant_service = get_qdrant_service()
-
             try:
                 if not already_ingested:
                     with st.spinner(f"Reading and indexing '{uploaded_file.name}'..."):
-                        if file_ext == ".docx":
-                            n_chunks = ingest_single_docx(dest_path, embedding_service, qdrant_service)
-                        elif file_ext in (".xlsx", ".xlsm", ".xls", ".csv"):
-                            n_chunks = ingest_single_excel(
-                                dest_path, embedding_service, qdrant_service
-                            )
-                        else:
-                            n_chunks = ingest_single_pdf(dest_path, embedding_service, qdrant_service)
+                        n_chunks = ingest_document_by_extension(
+                            dest_path, embedding_service, qdrant_service
+                        )
                     if n_chunks == 0:
                         st.error("No extractable content found in this document.")
                         st.stop()

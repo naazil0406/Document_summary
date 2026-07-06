@@ -36,11 +36,11 @@ _REQUEST_WORDS = {
 }
 
 
-_DOC_EXTENSIONS = (".pdf", ".docx")
+_DOC_EXTENSIONS = (".pdf", ".docx", ".xlsx", ".xlsm", ".xls", ".csv")
 
 
 def _words(value: str) -> list[str]:
-    value = re.sub(r"\.(?:pdf|docx)\b", " ", value.lower())
+    value = re.sub(r"\.(?:pdf|docx|xlsx|xlsm|xls|csv)\b", " ", value.lower())
     return re.findall(r"[a-z0-9]+", value)
 
 
