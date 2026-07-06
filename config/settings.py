@@ -53,7 +53,7 @@ class Settings:
     # --- Embeddings ---
     EMBEDDING_MODEL_NAME: str = os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-m3")
     EMBEDDING_DEVICE: str = os.getenv("EMBEDDING_DEVICE", "cpu")
-    INDEX_BATCH_SIZE: int = int(os.getenv("INDEX_BATCH_SIZE", "32"))
+    INDEX_BATCH_SIZE: int = int(os.getenv("INDEX_BATCH_SIZE", "8"))
 
     # --- Qdrant ---
     QDRANT_URL: str = os.getenv("QDRANT_URL", "http://localhost:6333")

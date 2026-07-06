@@ -26,6 +26,7 @@ EXCEL_EXTENSIONS = (".xlsx", ".xlsm", ".xls")
 CSV_EXTENSIONS = (".csv",)
 TABULAR_EXTENSIONS = EXCEL_EXTENSIONS + CSV_EXTENSIONS
 DEFAULT_ROWS_PER_CHUNK = 25
+DEFAULT_MAX_CHUNK_CHARS = 6000
 _NUMBER_RE = re.compile(r"^[-+]?(?:\d+(?:[,.]\d+)*|\.\d+)(?:[%$])?$")
 _HEADER_LABELS = {
     "audio",
@@ -370,6 +371,7 @@ def _build_structured_chunks(
     table_rows: Sequence[Tuple[int, Sequence[object]]],
     table_index: int,
     rows_per_chunk: int,
+    max_chunk_chars: int,
 ) -> List[PageContent]:
     cleaned = _remove_empty_columns(table_rows)
     table_name, headers, data_rows = _table_layout(cleaned, table_index)
@@ -382,9 +384,29 @@ def _build_structured_chunks(
         )
         return []
 
+    batches: List[List[Tuple[int, List[str]]]] = []
+    current: List[Tuple[int, List[str]]] = []
+    current_chars = 0
+    for row in data_rows:
+        row_chars = sum(
+            len(header) + len(value) + 3
+            for header, value in zip(headers, row[1])
+            if value
+        )
+        if current and (
+            len(current) >= rows_per_chunk
+            or current_chars + row_chars > max_chunk_chars
+        ):
+            batches.append(current)
+            current = []
+            current_chars = 0
+        current.append(row)
+        current_chars += row_chars
+    if current:
+        batches.append(current)
+
     pages: List[PageContent] = []
-    for offset in range(0, len(data_rows), rows_per_chunk):
-        batch = data_rows[offset : offset + rows_per_chunk]
+    for batch in batches:
         row_start, row_end = batch[0][0], batch[-1][0]
         lines = [
             f"Sheet: {sheet_name}",
@@ -429,6 +451,7 @@ class ExcelParser:
         excel_folder: str,
         llm_service: Optional[object] = None,
         rows_per_chunk: int = DEFAULT_ROWS_PER_CHUNK,
+        max_chunk_chars: int = DEFAULT_MAX_CHUNK_CHARS,
     ):
         if not 20 <= rows_per_chunk <= 30:
             raise ValueError("rows_per_chunk must be between 20 and 30")
@@ -436,6 +459,7 @@ class ExcelParser:
         # Kept for backward compatibility with callers from older releases.
         self.llm_service = llm_service
         self.rows_per_chunk = rows_per_chunk
+        self.max_chunk_chars = max(1000, max_chunk_chars)
 
     def _list_excel_files(self) -> List[str]:
         if not os.path.isdir(self.excel_folder):
@@ -466,6 +490,7 @@ class ExcelParser:
                         table_rows=table_rows,
                         table_index=table_index,
                         rows_per_chunk=self.rows_per_chunk,
+                        max_chunk_chars=self.max_chunk_chars,
                     )
                 )
         return pages
