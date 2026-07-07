@@ -114,6 +114,10 @@ _EXCEL_RESTRUCTURING_SYSTEM_PROMPT_PATH = os.path.join(
     _PROMPTS_DIR, "excel_restructuring_system_prompt.txt"
 )
 
+_IMAGE_PROMPT_SYSTEM_PROMPT_PATH = os.path.join(
+    _PROMPTS_DIR, "image_prompt_system.txt"
+)
+
 # Seed pool used to force a different illustrative character/workplace into
 # each generated script, so back-to-back runs don't converge on the same
 # story even at low sampling temperature.
@@ -195,6 +199,10 @@ def load_presentation_prompts() -> Tuple[str, str]:
 
 def load_excel_restructuring_system_prompt() -> str:
     return _load_prompt_template(_EXCEL_RESTRUCTURING_SYSTEM_PROMPT_PATH)
+
+
+def load_image_prompt_system_prompt() -> str:
+    return _load_prompt_template(_IMAGE_PROMPT_SYSTEM_PROMPT_PATH)
 
 
 def random_story_seed() -> Tuple[str, str]:
@@ -457,6 +465,39 @@ class BaseLLMService:
                 f"Excel restructuring for '{file_name}' / sheet '{sheet_name}' "
                 f"did not return valid JSON: {exc}\nRaw response: {response[:500]}"
             ) from exc
+
+    def generate_image_prompt(self, user_query: str, chunks: List[dict]) -> str:
+        """Nova Lite step of the image pipeline: turn a user's image request
+        plus retrieved RAG chunks into ONE optimized natural-language prompt
+        for Nova Canvas.
+
+        This must return a single continuous descriptive paragraph — no
+        markdown, no JSON, no bullet points — per the image_prompt_system.txt
+        rules, so unlike restructure_excel_content() there's no parsing step;
+        the raw stripped model text IS the Nova Canvas prompt.
+
+        Unlike every other prompt pair in this file, this one has no
+        separate user-prompt .txt template — the system prompt alone fully
+        specifies the task, so the user turn is just the request + context.
+        """
+        system_prompt = load_image_prompt_system_prompt()
+        retrieved_chunks = format_context(chunks)
+        user_prompt = (
+            f"User Request: {user_query}\n\n"
+            f"Retrieved Context:\n{retrieved_chunks}"
+        )
+        image_prompt = self._call_llm(system_prompt, user_prompt).strip()
+
+        # Defensive cleanup: models occasionally wrap output in quotes or
+        # code fences even when told not to.
+        if image_prompt.startswith("```"):
+            image_prompt = re.sub(r"^```(?:\w+)?\s*", "", image_prompt)
+            image_prompt = re.sub(r"\s*```$", "", image_prompt)
+        image_prompt = image_prompt.strip().strip('"').strip()
+
+        if not image_prompt:
+            raise RuntimeError("Nova Lite returned an empty image prompt.")
+        return image_prompt
 
 
 # ===========================================================================

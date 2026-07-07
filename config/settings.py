@@ -104,6 +104,29 @@ class Settings:
     # in addition to being shown/downloadable in the Streamlit UI.
     NARRATIVE_SCRIPTS_DIR: str = os.getenv("NARRATIVE_SCRIPTS_DIR", "Narrative_scripts")
 
+    # --- Image generation pipeline (Nova Lite -> Nova Canvas) ---
+    # Model 1: Nova Lite turns the user's request + retrieved RAG chunks
+    # into one optimized image-generation prompt (see
+    # prompts/image_prompt_system.txt / image_prompt_user.txt and
+    # services/llm_service.py's generate_image_prompt()). Always Bedrock —
+    # this pipeline does not have an OpenRouter path.
+    BEDROCK_IMAGE_PROMPT_MODEL: str = os.getenv("BEDROCK_IMAGE_PROMPT_MODEL", "amazon.nova-lite-v1:0")
+    IMAGE_PROMPT_MAX_TOKENS: int = int(os.getenv("IMAGE_PROMPT_MAX_TOKENS", "512"))
+    IMAGE_PROMPT_TEMPERATURE: float = float(os.getenv("IMAGE_PROMPT_TEMPERATURE", "0.3"))
+
+    # Model 2: Nova Canvas renders the final image from that prompt (see
+    # services/image_generation_service.py). Uses invoke_model, not
+    # converse — a different call shape from every other Bedrock model here.
+    BEDROCK_IMAGE_GEN_MODEL: str = os.getenv("BEDROCK_IMAGE_GEN_MODEL", "amazon.nova-canvas-v1:0")
+    IMAGE_WIDTH: int = int(os.getenv("IMAGE_WIDTH", "1024"))
+    IMAGE_HEIGHT: int = int(os.getenv("IMAGE_HEIGHT", "1024"))
+    IMAGE_QUALITY: str = os.getenv("IMAGE_QUALITY", "standard")
+    IMAGE_CFG_SCALE: float = float(os.getenv("IMAGE_CFG_SCALE", "8.0"))
+
+    # Local folder generated images are saved to, in addition to being
+    # returned directly in the API response (mirrors NARRATIVE_SCRIPTS_DIR).
+    GENERATED_IMAGES_DIR: str = os.getenv("GENERATED_IMAGES_DIR", "Generated_images")
+
     # --- Logging ---
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 

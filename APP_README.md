@@ -197,7 +197,7 @@ python -m scripts.summarize unit2.pdf
 ---
 docker compose up -d qdrant
 pip install -r requirements.txt
-uvicorn main:app --reload --port 8000
+uvicorn main:app --reload --port 8000  
 ## AWS Bedrock setup (only if `LLM_PROVIDER=bedrock`)
 
 Two things live in the **AWS console**, not `.env`:

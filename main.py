@@ -16,6 +16,7 @@ Then open http://localhost:8000 — it serves static/index.html, which is
 the UI wired to the endpoints below.
 """
 
+import base64
 import logging
 import os
 import re
@@ -48,6 +49,7 @@ from services.document_resolver import (
     resolve_pdf_reference,
     resolve_summary_request,
 )
+from services.image_generation_service import NovaCanvasService
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +140,33 @@ def get_summary_llm() -> OpenRouterLLMService:
         temperature=settings.OPENROUTER_TEMPERATURE,
         site_url=settings.OPENROUTER_SITE_URL,
         site_name=settings.OPENROUTER_SITE_NAME,
+    )
+
+
+@lru_cache(maxsize=1)
+def get_image_prompt_llm() -> BedrockLLMService:
+    """Nova Lite — always Bedrock, no OpenRouter fallback for this pipeline."""
+    return BedrockLLMService(
+        model=settings.BEDROCK_IMAGE_PROMPT_MODEL,
+        max_tokens=settings.IMAGE_PROMPT_MAX_TOKENS,
+        temperature=settings.IMAGE_PROMPT_TEMPERATURE,
+        region_name=settings.BEDROCK_REGION,
+        aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+    )
+
+
+@lru_cache(maxsize=1)
+def get_image_gen_service() -> NovaCanvasService:
+    return NovaCanvasService(
+        model=settings.BEDROCK_IMAGE_GEN_MODEL,
+        region_name=settings.BEDROCK_REGION,
+        aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+        width=settings.IMAGE_WIDTH,
+        height=settings.IMAGE_HEIGHT,
+        quality=settings.IMAGE_QUALITY,
+        cfg_scale=settings.IMAGE_CFG_SCALE,
     )
 
 
@@ -351,6 +380,49 @@ def save_narrative_script(script_text: str, label: str) -> str:
     return path
 
 
+def save_generated_image(image_bytes: bytes, label: str) -> str:
+    os.makedirs(settings.GENERATED_IMAGES_DIR, exist_ok=True)
+    safe_label = re.sub(r"[^A-Za-z0-9_-]+", "_", label).strip("_") or "image"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"generated_{safe_label}_{timestamp}.png"
+    path = os.path.join(settings.GENERATED_IMAGES_DIR, filename)
+    with open(path, "wb") as f:
+        f.write(image_bytes)
+    logger.info("Saved generated image to '%s'.", path)
+    return path
+
+
+def generate_document_image(
+    query: str,
+    retriever,
+    image_prompt_llm,
+    image_gen_service,
+) -> dict:
+    """Full image pipeline: retrieve relevant chunks for the query -> Nova
+    Lite turns (query + chunks) into one optimized prompt -> Nova Canvas
+    renders the image. Returns the Nova Lite prompt alongside the saved
+    image path and base64 payload so the caller/API can show both.
+    """
+    try:
+        chunks = retriever.retrieve(query)
+    except Exception as exc:
+        logger.error("Retrieval failed during image generation: %s", exc)
+        raise RuntimeError("An error occurred while retrieving relevant information.") from exc
+
+    if not chunks:
+        raise ValueError("No relevant context was found in the indexed documents for this request.")
+
+    image_prompt = image_prompt_llm.generate_image_prompt(query, chunks)
+    image_bytes = image_gen_service.generate_image(image_prompt)
+    saved_path = save_generated_image(image_bytes, label=query[:40])
+
+    return {
+        "image_prompt": image_prompt,
+        "image_base64": base64.b64encode(image_bytes).decode("utf-8"),
+        "saved_path": saved_path,
+    }
+
+
 def summarize_indexed_document(name: str, qdrant_service, summary_llm) -> str:
     chunks = _get_all_chunks(name, qdrant_service)
     if chunks is None:
@@ -485,6 +557,16 @@ class TranscriptSummary(BaseModel):
     id: str
     label: str
     created_at: str
+
+
+class ImageGenRequest(BaseModel):
+    query: str
+
+
+class ImageGenResponse(BaseModel):
+    image_prompt: str
+    image_base64: str
+    saved_path: str
 
 
 @app.on_event("startup")
@@ -775,6 +857,35 @@ def chat(req: ChatRequest):
         raise
     except Exception as exc:
         return ChatResponse(answer=f"An error occurred while answering: {exc}", type="info")
+
+
+@app.post("/api/generate-image", response_model=ImageGenResponse)
+def generate_image(req: ImageGenRequest):
+    """Image generation pipeline: retrieve relevant chunks for req.query,
+    have Nova Lite turn (query + chunks) into one optimized prompt, then
+    have Nova Canvas render the image. Returns the Nova Lite prompt (for
+    transparency/debugging) plus the image as base64 and the on-disk path
+    it was also saved to.
+    """
+    query = req.query.strip()
+    if not query:
+        raise HTTPException(400, "query must not be empty.")
+
+    retriever = get_retriever()
+    image_prompt_llm = get_image_prompt_llm()
+    image_gen_service = get_image_gen_service()
+
+    try:
+        result = generate_document_image(query, retriever, image_prompt_llm, image_gen_service)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc))
+    except Exception as exc:
+        logger.error("Image generation failed: %s", exc)
+        raise HTTPException(500, "An error occurred while generating the image.")
+
+    return ImageGenResponse(**result)
 
 
 # ---------------------------------------------------------------------------
