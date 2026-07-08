@@ -104,7 +104,7 @@ class Settings:
     # in addition to being shown/downloadable in the Streamlit UI.
     NARRATIVE_SCRIPTS_DIR: str = os.getenv("NARRATIVE_SCRIPTS_DIR", "Narrative_scripts")
 
-    # --- Image generation pipeline (Nova Lite -> Nova Canvas) ---
+    # --- Image generation pipeline (Nova Lite prompt -> image renderer) ---
     # Model 1: Nova Lite turns the user's request + retrieved RAG chunks
     # into one optimized image-generation prompt (see
     # prompts/image_prompt_system.txt / image_prompt_user.txt and
@@ -114,14 +114,43 @@ class Settings:
     IMAGE_PROMPT_MAX_TOKENS: int = int(os.getenv("IMAGE_PROMPT_MAX_TOKENS", "512"))
     IMAGE_PROMPT_TEMPERATURE: float = float(os.getenv("IMAGE_PROMPT_TEMPERATURE", "0.3"))
 
-    # Model 2: Nova Canvas renders the final image from that prompt (see
-    # services/image_generation_service.py). Uses invoke_model, not
-    # converse — a different call shape from every other Bedrock model here.
+    # Renderer 2: turns that prompt into the actual image. Three
+    # interchangeable providers, all exposed as `.generate_image(prompt)` in
+    # services/image_generation_service.py — see get_image_gen_service() in
+    # main.py for the switch.
+    #   "huggingface" (default): FLUX.1-dev via Hugging Face Inference
+    #     Providers. Requires HF_TOKEN (from huggingface.co/settings/tokens);
+    #     hf-inference has a free tier.
+    #   "pollinations": Pollinations AI — free, no API key or AWS account
+    #     required. https://pollinations.ai
+    #   "aws": Amazon Bedrock Nova Canvas — requires AWS credentials and
+    #     Bedrock model access; kept as an opt-in alternative.
+    IMAGE_PROVIDER: str = os.getenv("IMAGE_PROVIDER", "aws")
+
+    # Hugging Face / FLUX.1-dev settings (used when IMAGE_PROVIDER == "huggingface")
+    HF_TOKEN: str = os.getenv("HF_TOKEN", "")
+    HF_FLUX_MODEL: str = os.getenv("HF_FLUX_MODEL", "black-forest-labs/FLUX.1-dev")
+    # "auto" lets Hugging Face route to whichever backend (fal, replicate,
+    # together, hf-inference, etc.) currently serves the model, instead of
+    # us hardcoding one provider that might not have it warm.
+    HF_INFERENCE_PROVIDER: str = os.getenv("HF_INFERENCE_PROVIDER", "auto")
+    FLUX_NUM_INFERENCE_STEPS: int = int(os.getenv("FLUX_NUM_INFERENCE_STEPS", "30"))
+    FLUX_GUIDANCE_SCALE: float = float(os.getenv("FLUX_GUIDANCE_SCALE", "3.5"))
+
+    # Pollinations AI settings (used when IMAGE_PROVIDER == "pollinations")
+    POLLINATIONS_MODEL: str = os.getenv("POLLINATIONS_MODEL", "flux")
+    POLLINATIONS_BASE_URL: str = os.getenv("POLLINATIONS_BASE_URL", "https://image.pollinations.ai/prompt")
+
+    # Nova Canvas settings (used when IMAGE_PROVIDER == "aws"). Uses
+    # invoke_model, not converse — a different call shape from every other
+    # Bedrock model here.
     BEDROCK_IMAGE_GEN_MODEL: str = os.getenv("BEDROCK_IMAGE_GEN_MODEL", "amazon.nova-canvas-v1:0")
-    IMAGE_WIDTH: int = int(os.getenv("IMAGE_WIDTH", "1024"))
-    IMAGE_HEIGHT: int = int(os.getenv("IMAGE_HEIGHT", "1024"))
     IMAGE_QUALITY: str = os.getenv("IMAGE_QUALITY", "standard")
     IMAGE_CFG_SCALE: float = float(os.getenv("IMAGE_CFG_SCALE", "8.0"))
+
+    # Shared by both providers.
+    IMAGE_WIDTH: int = int(os.getenv("IMAGE_WIDTH", "1024"))
+    IMAGE_HEIGHT: int = int(os.getenv("IMAGE_HEIGHT", "1024"))
 
     # Local folder generated images are saved to, in addition to being
     # returned directly in the API response (mirrors NARRATIVE_SCRIPTS_DIR).

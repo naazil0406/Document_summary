@@ -49,7 +49,7 @@ from services.document_resolver import (
     resolve_pdf_reference,
     resolve_summary_request,
 )
-from services.image_generation_service import NovaCanvasService
+from services.image_generation_service import HuggingFaceFluxService, PollinationsImageService, NovaCanvasService
 
 logger = logging.getLogger(__name__)
 
@@ -157,16 +157,43 @@ def get_image_prompt_llm() -> BedrockLLMService:
 
 
 @lru_cache(maxsize=1)
-def get_image_gen_service() -> NovaCanvasService:
-    return NovaCanvasService(
-        model=settings.BEDROCK_IMAGE_GEN_MODEL,
-        region_name=settings.BEDROCK_REGION,
-        aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-        aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+def get_image_gen_service():
+    """Returns the configured image-rendering backend (all three expose the
+    same `.generate_image(prompt)` interface — see
+    services/image_generation_service.py).
+
+    Defaults to FLUX.1-dev via Hugging Face Inference Providers (requires
+    HF_TOKEN). Set IMAGE_PROVIDER=pollinations for the no-signup free
+    option, or IMAGE_PROVIDER=aws for Bedrock Nova Canvas.
+    """
+    if settings.IMAGE_PROVIDER == "aws":
+        return NovaCanvasService(
+            model=settings.BEDROCK_IMAGE_GEN_MODEL,
+            region_name=settings.BEDROCK_REGION,
+            aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+            width=settings.IMAGE_WIDTH,
+            height=settings.IMAGE_HEIGHT,
+            quality=settings.IMAGE_QUALITY,
+            cfg_scale=settings.IMAGE_CFG_SCALE,
+        )
+
+    if settings.IMAGE_PROVIDER == "pollinations":
+        return PollinationsImageService(
+            model=settings.POLLINATIONS_MODEL,
+            base_url=settings.POLLINATIONS_BASE_URL,
+            width=settings.IMAGE_WIDTH,
+            height=settings.IMAGE_HEIGHT,
+        )
+
+    return HuggingFaceFluxService(
+        api_token=settings.HF_TOKEN,
+        model=settings.HF_FLUX_MODEL,
+        provider=settings.HF_INFERENCE_PROVIDER,
         width=settings.IMAGE_WIDTH,
         height=settings.IMAGE_HEIGHT,
-        quality=settings.IMAGE_QUALITY,
-        cfg_scale=settings.IMAGE_CFG_SCALE,
+        num_inference_steps=settings.FLUX_NUM_INFERENCE_STEPS,
+        guidance_scale=settings.FLUX_GUIDANCE_SCALE,
     )
 
 
