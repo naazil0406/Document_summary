@@ -5,15 +5,23 @@ Combines the embedding service and the Qdrant service: converts a user
 query into a BGE-M3 embedding, then retrieves the most relevant stored
 chunks via similarity search.
 
-Improvements:
-  - TOC-aware filtering: when a query mentions a document section name
-    (e.g. "unit 2", "chapter 3", "introduction") the retriever tries to
-    narrow results to chunks whose toc_section matches, before falling
-    back to the full result set.
-  - Document-name filtering: "summarize unit2.pdf" or "summarize unit 2"
-    correctly isolates chunks from that file.
-  - Summary/overview queries fetch a larger candidate set (TOP_K_SUMMARY).
-  - A minimum relevance score threshold (MIN_SCORE) is enforced.
+Matching strategy:
+  - Document/filename-based matching has been intentionally removed.
+    Filenames in this deployment are inconsistent/messy in the UI, so they
+    are not a reliable signal.
+  - Instead, the retriever matches purely on a "unit / chapter / section +
+    number" hint extracted from the query (e.g. "unit 2", "chapter 3",
+    "section 1"). This hint is matched against each TOC entry's own title
+    (for the fast TOC-lookup path) and against each chunk's toc_section
+    payload field (for the semantic-search fallback path) — never against
+    filename. This correctly distinguishes "Unit 1" from "Unit 2" even when
+    every unit lives inside the same physical file.
+  - Summary/overview/infographic/image queries fetch a larger candidate set
+    (TOP_K_SUMMARY) and skip the TOC-first shortcut in favor of broader
+    semantic retrieval.
+  - A minimum relevance score threshold (MIN_SCORE) is enforced, with a
+    keyword-overlap fallback for cases where semantic scores run low
+    (e.g. tabular/workbook content).
 """
 
 import logging
@@ -41,18 +49,16 @@ SUMMARY_KEYWORDS = {
     "what does this document",
     "describe this document",
     "tell me about this document",
+    "infographic",
+    "visual summary",
+    "visual overview",
+    "image for",
+    "image of",
+    "picture for",
+    "picture of",
 }
 
 TOC_MATCH_THRESHOLD = 0.80
-
-# Generic words stripped out before fuzzy-matching a query against real
-# filenames in the corpus — these carry no identifying signal.
-_FILENAME_STOPWORDS = {
-    "the", "a", "an", "of", "and", "to", "in", "for", "on", "at", "by",
-    "is", "are", "this", "that", "document", "file", "pdf", "presentation",
-    "workbook", "report", "doc", "according", "about", "say", "says",
-    "what", "does", "unit",
-}
 
 
 class Retriever:
@@ -91,9 +97,10 @@ class Retriever:
         q = self._normalize_query(query)
         if any(keyword in q for keyword in SUMMARY_KEYWORDS):
             return True
-        # "summarize unit 2", "unit 2 summary", etc.
+        # "summarize unit 2", "unit 2 summary", "infographic of unit 2",
+        # "image for unit 2", etc.
         if re.search(r"\bunit\s*\d+\b", q) and re.search(
-            r"\b(summary|summarize|overview|brief)\b", q
+            r"\b(summary|summarize|overview|brief|infographic|image|picture)\b", q
         ):
             return True
         return False
@@ -101,60 +108,35 @@ class Retriever:
     def _get_top_k(self, query: str) -> int:
         return self.summary_top_k if self._is_summary_query(query) else self.top_k
 
-    # ── Document / section hint extraction ───────────────────────────────────
+    # ── Unit / chapter / section hint extraction ─────────────────────────────
 
-    def _extract_document_hint(self, query: str) -> str:
+    def _extract_unit_hint(self, query: str) -> str:
         """
-        Extract a likely filename stem or document name from the query.
+        Extract a "unit N" / "chapter N" / "section N" hint from the query.
+        This is the ONLY scoping signal this retriever uses — there is no
+        filename/document-name matching, since filenames are inconsistent
+        in this deployment and not a reliable way to identify content.
 
-        Handles patterns like:
-          - "summarize unit2.pdf"          → "unit2.pdf"
-          - "summarize unit 2"             → "unit 2"
-          - "summarize unit2"              → "unit2"
-          - "give me a summary of unit 2"  → "unit 2"
-          - "what is in chapter 3"         → "chapter 3"
-          - "tell me about the introduction section" → "introduction"
+        Examples:
+          - "give me an image for unit2"   → "unit 2"
+          - "infographic of unit 2"        → "unit 2"
+          - "summarize chapter 3"          → "chapter 3"
+          - "what is in section 1"         → "section 1"
         """
         normalized = self._normalize_query(query)
-
-        # Explicit PDF filename — no spaces allowed in filename stem
-        m = re.search(r"\b([a-z0-9][a-z0-9._-]*\.pdf)\b", normalized)
-        if m:
-            return m.group(1).strip()
-
-        # "unit N" / "chapter N" / "section N" patterns (with or without space)
         m = re.search(r"\b(unit\s*\d+|chapter\s*\d+|section\s*\d+)\b", normalized)
         if m:
+            raw = m.group(1)
             # normalise spacing so "unit2" → "unit 2"
-            raw = m.group(1)
-            cleaned = re.sub(r"(unit|chapter|section)\s*(\d+)", r"\1 \2", raw)
-            return cleaned.strip()
-
-        # "summarize <word>", "summary of <word>", "overview of <word>"
-        for pattern in [
-            r"\b(?:summarize|summary of|overview of|brief on|describe)\s+([a-z0-9][a-z0-9_.-]+)\b",
-            r"\b([a-z0-9][a-z0-9_.-]+)\s+(?:summary|overview|brief)\b",
-        ]:
-            m = re.search(pattern, normalized)
-            if m:
-                candidate = m.group(1).strip(" .")
-                # Skip generic filler words
-                if candidate not in {"the", "a", "an", "this", "that", "document", "file", "pdf"}:
-                    return candidate
-
-        return ""
-
-    def _extract_toc_section_hint(self, query: str) -> str:
-        """
-        Return a section label hint to filter toc_section payload field.
-        E.g. "summarize unit 2" → "unit 2"
-        """
-        normalized = self._normalize_query(query)
-        m = re.search(r"\b(unit\s*\d+|chapter\s*\d+|section\s*\d+)\b", normalized)
-        if m:
-            raw = m.group(1)
             return re.sub(r"(unit|chapter|section)\s*(\d+)", r"\1 \2", raw).strip()
         return ""
+
+    def extract_unit_hint(self, query: str) -> str:
+        """Public wrapper around _extract_unit_hint, for callers outside this
+        class (e.g. the image-generation pipeline) that want to know whether
+        a query names a specific unit/chapter/section.
+        """
+        return self._extract_unit_hint(query)
 
     def _rewrite_query_for_retrieval(self, query: str) -> str:
         """Remove summary-style wording before embedding for retrieval."""
@@ -162,7 +144,8 @@ class Retriever:
         if not self._is_summary_query(normalized):
             return normalized
         rewritten = re.sub(
-            r"\b(summary|summarize|summarise|overview|brief|executive summary|document summary)\b",
+            r"\b(summary|summarize|summarise|overview|brief|executive summary|"
+            r"document summary|infographic|visual summary|visual overview)\b",
             "",
             normalized,
         )
@@ -172,86 +155,65 @@ class Retriever:
     # ── Matching helpers ──────────────────────────────────────────────────────
 
     @staticmethod
-    def _filename_matches(filename: str, hint: str) -> bool:
+    def _title_matches(title: str, hint: str) -> bool:
+        """Return True when a TOC entry's *title* is consistent with a
+        unit/chapter/section hint extracted from the query (e.g. "unit 2").
+
+        This is what distinguishes "Unit 1" from "Unit 2" when every unit
+        lives in the same file — only the TOC entry's own title carries
+        that distinction, since filename is no longer used for matching.
+
+        Titles in this deployment follow the format
+        "Unit <number> - <unique number>" (e.g. "Unit 2 - 100234"). Matching
+        is done by extracting the keyword ("unit"/"chapter"/"section") and
+        its number from both the hint and the title and comparing them
+        exactly — NOT by substring matching. Substring matching on a hint
+        like "unit 2" would incorrectly match a title like
+        "Unit 20 - 100235" (since "unit2" is a substring of "unit20"), so
+        exact number comparison is required to tell "Unit 2" apart from
+        "Unit 20", "Unit 21", "Unit 200", etc. The trailing unique number
+        after the dash is ignored entirely for matching purposes.
         """
-        Return True when *filename* is consistent with the hint extracted
-        from the query.  Matching is fuzzy: the hint can be a bare stem
-        ("unit2"), a normalised form ("unit 2"), or a full name
-        ("unit2.pdf").
-        """
-        if not filename or not hint:
-            return True
-        fn = filename.lower()
-        h = hint.lower()
-
-        # Exact or suffix match for explicit PDF filename
-        if h.endswith(".pdf"):
-            return fn == h or fn.endswith(h)
-
-        # Normalise: collapse spaces and remove extension for comparison
-        fn_stem = re.sub(r"\.pdf$", "", fn)
-        fn_nospace = re.sub(r"\s+", "", fn_stem)
-        h_nospace = re.sub(r"\s+", "", h)
-
-        return (
-            h in fn_stem
-            or fn_stem.endswith(h)
-            or h_nospace in fn_nospace
-            or fn_nospace == h_nospace
-        )
+        if not title or not hint:
+            return False
+        hint_keyword, hint_number = Retriever._extract_keyword_number(hint)
+        title_keyword, title_number = Retriever._extract_keyword_number(title)
+        if hint_keyword and title_keyword:
+            return hint_keyword == title_keyword and hint_number == title_number
+        # Hint or title didn't parse as "keyword number" (unexpected format) —
+        # fall back to a plain substring check rather than silently failing.
+        return hint.lower() in title.lower()
 
     @staticmethod
     def _toc_section_matches(toc_section: str, hint: str) -> bool:
-        """Return True when *toc_section* contains the section hint."""
+        """Return True when a chunk's *toc_section* payload field is
+        consistent with the unit/chapter/section hint extracted from the
+        query. Uses the same exact keyword+number comparison as
+        _title_matches, for the same reason (avoid "unit 2" matching
+        "unit 20").
+        """
         if not toc_section or not hint:
             return False
-        ts = toc_section.lower()
-        h = hint.lower()
-        # normalise "unit 2" ↔ "unit2"
-        ts_nospace = re.sub(r"\s+", "", ts)
-        h_nospace = re.sub(r"\s+", "", h)
-        return h in ts or h_nospace in ts_nospace
+        hint_keyword, hint_number = Retriever._extract_keyword_number(hint)
+        section_keyword, section_number = Retriever._extract_keyword_number(toc_section)
+        if hint_keyword and section_keyword:
+            return hint_keyword == section_keyword and hint_number == section_number
+        return hint.lower() in toc_section.lower()
 
     @staticmethod
-    def _match_known_filename(query: str, candidate_filenames) -> str:
+    def _extract_keyword_number(text: str):
+        """Extract a (keyword, number) pair like ("unit", "2") from a string
+        such as "unit 2", "Unit 2 - 100234", or "Unit2". Returns (None, None)
+        if no unit/chapter/section + number pattern is found. The number is
+        compared as a normalized string (leading zeros stripped) so "unit 02"
+        and "unit 2" are still treated as the same unit.
         """
-        Fuzzy-match the raw query text against actual filenames present in
-        the candidate result set (no trigger word required).
-
-        This covers plain Q&A that names a document directly, e.g.
-        "What does the SkinDisease CDSS presentation say about accuracy?"
-        — which has no "summarize"/"unit N" keyword for
-        `_extract_document_hint()` to latch onto, but clearly identifies a
-        specific document by name. Each filename stem is split into
-        significant words (stopwords and short tokens removed); if enough
-        of those words appear in the query, that filename becomes the hint.
-        """
-        q_norm = re.sub(r"[^a-z0-9]+", " ", query.lower()).strip()
-        if not q_norm:
-            return ""
-
-        best_match, best_score = "", 0.0
-        for fname in candidate_filenames:
-            if not fname:
-                continue
-            stem = re.sub(r"\.pdf$", "", fname.lower())
-            words = [
-                w for w in re.split(r"[^a-z0-9]+", stem)
-                if w and w not in _FILENAME_STOPWORDS and len(w) > 2
-            ]
-            if not words:
-                continue
-            hits = sum(1 for w in words if w in q_norm)
-            if hits == 0:
-                continue
-            score = hits / len(words)
-            # Require either multiple matching words, or a single-word stem
-            # that matches outright — avoids matching on one generic token.
-            if score > best_score and (hits >= 2 or len(words) == 1):
-                best_score = score
-                best_match = fname
-
-        return best_match if best_score >= 0.5 else ""
+        if not text:
+            return None, None
+        m = re.search(r"\b(unit|chapter|section)\s*0*(\d+)\b", text.lower())
+        if m:
+            return m.group(1), m.group(2)
+        return None, None
 
     # ── Main retrieval ────────────────────────────────────────────────────────
 
@@ -271,15 +233,13 @@ class Retriever:
         query_vector = self.embedding_service.embed_query(retrieval_query)
 
         top_k = self._get_top_k(query)
-        document_hint = self._extract_document_hint(query)
-        toc_hint = self._extract_toc_section_hint(query)
+        unit_hint = self._extract_unit_hint(query)
 
         logger.info(
-            "Query intent: %s | top_k=%d | document_hint=%r | toc_hint=%r",
+            "Query intent: %s | top_k=%d | unit_hint=%r",
             "SUMMARY" if self._is_summary_query(query) else "Q&A",
             top_k,
-            document_hint or "none",
-            toc_hint or "none",
+            unit_hint or "none",
         )
 
         # Summary requests retain the existing summary retrieval behavior.
@@ -295,16 +255,25 @@ class Retriever:
                 )
                 toc_results = []
 
-            if document_hint:
-                document_toc_results = [
+            # Narrow by unit/chapter/section title. This is the ONLY
+            # scoping applied here — no filename matching. Only fall back
+            # to the unfiltered set if nothing actually matches the hint,
+            # so we never silently prefer a wrong-unit result just because
+            # it scored higher semantically.
+            if unit_hint:
+                title_filtered = [
                     result
                     for result in toc_results
-                    if self._filename_matches(
-                        result.get("filename", ""),
-                        document_hint,
-                    )
+                    if self._title_matches(result.get("title", ""), unit_hint)
                 ]
-                toc_results = document_toc_results
+                if title_filtered:
+                    toc_results = title_filtered
+                else:
+                    logger.info(
+                        "TOC title filter '%s' matched no TOC entries — "
+                        "falling back to unfiltered TOC candidates.",
+                        unit_hint,
+                    )
 
             eligible_toc_results = [
                 result
@@ -402,52 +371,23 @@ class Retriever:
             )
             filtered = results
 
-        # If no trigger-word pattern matched a document name (e.g. plain Q&A
-        # like "What does the SkinDisease CDSS presentation say about X?"),
-        # try fuzzy-matching the query directly against filenames actually
-        # present in this candidate set.
-        if not document_hint:
-            candidate_filenames = {r.get("filename", "") for r in filtered}
-            document_hint = self._match_known_filename(query, candidate_filenames)
-            if document_hint:
-                logger.info("Matched document by name from query text: '%s'", document_hint)
-
-        # ── TOC section filtering (most specific, try first) ─────────────────
-        if toc_hint:
-            toc_filtered = [
+        # ── Unit / chapter / section filtering (the only scoping signal) ─────
+        if unit_hint:
+            unit_filtered = [
                 r for r in filtered
-                if self._toc_section_matches(r.get("toc_section", ""), toc_hint)
+                if self._toc_section_matches(r.get("toc_section", ""), unit_hint)
             ]
-            if toc_filtered:
+            if unit_filtered:
                 logger.info(
-                    "TOC section filter '%s' matched %d chunk(s).",
-                    toc_hint, len(toc_filtered),
+                    "Unit hint '%s' matched %d chunk(s).",
+                    unit_hint, len(unit_filtered),
                 )
-                filtered = toc_filtered
+                filtered = unit_filtered
             else:
                 logger.info(
-                    "TOC section filter '%s' matched nothing — "
-                    "falling through to filename filter.",
-                    toc_hint,
-                )
-
-        # ── Filename / document-name filtering ───────────────────────────────
-        if document_hint:
-            doc_filtered = [
-                r for r in filtered
-                if self._filename_matches(r.get("filename", ""), document_hint)
-            ]
-            if doc_filtered:
-                logger.info(
-                    "Document hint '%s' matched %d chunk(s).",
-                    document_hint, len(doc_filtered),
-                )
-                filtered = doc_filtered
-            else:
-                logger.info(
-                    "Document hint '%s' matched no filenames — "
+                    "Unit hint '%s' matched no chunks — "
                     "returning all relevance-filtered chunks.",
-                    document_hint,
+                    unit_hint,
                 )
 
         if filtered:

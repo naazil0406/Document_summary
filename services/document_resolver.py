@@ -38,6 +38,9 @@ _REQUEST_WORDS = {
 
 _DOC_EXTENSIONS = (".pdf", ".docx", ".xlsx", ".xlsm", ".xls", ".csv")
 
+_UNIT_PATTERN = re.compile(r"\bunit\s*0*(\d+)\b", re.IGNORECASE)
+_PART_PATTERN = re.compile(r"\bpart\s*0*(\d+)\b", re.IGNORECASE)
+
 
 def _words(value: str) -> list[str]:
     value = re.sub(r"\.(?:pdf|docx|xlsx|xlsm|xls|csv)\b", " ", value.lower())
@@ -50,6 +53,16 @@ def _compact(value: str) -> str:
 
 def _reference_words(value: str) -> list[str]:
     return [word for word in _words(value) if word not in _REQUEST_WORDS]
+
+
+def _unit_number(value: str) -> Optional[str]:
+    match = _UNIT_PATTERN.search(value)
+    return match.group(1) if match else None
+
+
+def _part_number(value: str) -> Optional[str]:
+    match = _PART_PATTERN.search(value)
+    return match.group(1) if match else None
 
 
 def resolve_pdf_reference(reference: str, filenames: Iterable[str]) -> Optional[str]:
@@ -66,6 +79,9 @@ def resolve_pdf_reference(reference: str, filenames: Iterable[str]) -> Optional[
 
     reference_phrase = " ".join(reference_words)
     reference_compact = "".join(reference_words)
+    ref_unit = _unit_number(reference)
+    ref_part = _part_number(reference)
+
     scored = []
 
     for filename in candidates:
@@ -73,6 +89,15 @@ def resolve_pdf_reference(reference: str, filenames: Iterable[str]) -> Optional[
         stem_words = _words(stem)
         stem_phrase = " ".join(stem_words)
         stem_compact = "".join(stem_words)
+
+        file_unit = _unit_number(stem)
+        file_part = _part_number(stem)
+
+        # If the reference names a specific unit number, filenames with a
+        # *different* unit number (or no unit number at all, when others do
+        # match) are disqualified outright rather than fuzzy-scored.
+        if ref_unit is not None and file_unit is not None and file_unit != ref_unit:
+            continue
 
         score = 0
         if reference.lower().strip() == filename.lower():
@@ -88,8 +113,24 @@ def resolve_pdf_reference(reference: str, filenames: Iterable[str]) -> Optional[
         elif all(word in stem_words for word in reference_words):
             score = 500 + sum(len(word) for word in reference_words)
 
-        if score:
-            scored.append((score, filename))
+        if not score:
+            continue
+
+        # Bonus for exact unit-number match; this is what breaks the
+        # "Unit 1" vs "Unit 1 Part 1" tie in favor of the plain unit file
+        # when the reference itself has no part number.
+        if ref_unit is not None and file_unit == ref_unit:
+            score += 50
+            # Penalize files that carry an *extra* part number the
+            # reference didn't ask for — they're more specific than what
+            # was requested, so they shouldn't outrank a bare unit match.
+            if ref_part is None and file_part is not None:
+                score -= 20
+            # Reward exact part match when the reference asked for one.
+            if ref_part is not None and file_part == ref_part:
+                score += 30
+
+        scored.append((score, filename))
 
     if not scored:
         return None

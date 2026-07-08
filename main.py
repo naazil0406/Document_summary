@@ -395,6 +395,77 @@ def _get_all_chunks(name: str, qdrant_service):
     return [{"text": c["text"], "filename": c["filename"], "page_label": c["page_label"]} for c in raw]
 
 
+# Matches requests like "give me an infographic of the documents I have",
+# "an overview of all my documents", "everything I've uploaded", etc. — i.e.
+# no single document is named, the request spans the whole corpus.
+_ALL_DOCUMENTS_PATTERN = re.compile(
+    r"\b("
+    r"all( of)? (my|the) documents|"
+    r"the documents i have|"
+    r"all my (documents|files|uploads)|"
+    r"all (the )?(documents|files)|"
+    r"every document|"
+    r"entire (document )?(library|collection)|"
+    r"everything i(?:'ve| have) uploaded|"
+    r"across (my|all)( of the)? documents"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _is_all_documents_request(query: str) -> bool:
+    return bool(_ALL_DOCUMENTS_PATTERN.search(query))
+
+
+def _collect_cross_document_chunks(
+    qdrant_service,
+    max_docs: int = 8,
+    chunks_per_doc: int = 3,
+) -> List[dict]:
+    """Sample a few chunks from every ingested document.
+
+    Used for "infographic of all my documents"-style requests, where the
+    query text itself ("the documents I have") carries no topical signal
+    for semantic search to latch onto. Rather than embedding that phrase
+    and letting one document win arbitrarily, this pulls a spread of
+    chunks (start / middle / end) from each file so the resulting
+    infographic can actually reflect the whole corpus. Caps the number of
+    documents sampled so the combined context stays a manageable size for
+    the prompt-writing model.
+    """
+    filenames = existing_documents()
+    if not filenames:
+        return []
+
+    collected: List[dict] = []
+    for filename in filenames[:max_docs]:
+        try:
+            raw = qdrant_service.retrieve_document(filename)
+        except Exception as exc:
+            logger.warning(
+                "Could not fetch chunks for '%s' during cross-document image request: %s",
+                filename, exc,
+            )
+            continue
+        if not raw:
+            continue
+
+        sample_indices = sorted(set(
+            idx for idx in (0, len(raw) // 2, len(raw) - 1)
+            if 0 <= idx < len(raw)
+        ))[:chunks_per_doc]
+
+        for idx in sample_indices:
+            c = raw[idx]
+            collected.append({
+                "text": c["text"],
+                "filename": c["filename"],
+                "page_label": c.get("page_label"),
+            })
+
+    return collected
+
+
 def save_narrative_script(script_text: str, label: str) -> str:
     os.makedirs(settings.NARRATIVE_SCRIPTS_DIR, exist_ok=True)
     safe_label = re.sub(r"[^A-Za-z0-9_-]+", "_", label).strip("_") or "script"
@@ -429,18 +500,51 @@ def generate_document_image(
     Lite turns (query + chunks) into one optimized prompt -> Nova Canvas
     renders the image. Returns the Nova Lite prompt alongside the saved
     image path and base64 payload so the caller/API can show both.
-    """
-    try:
-        chunks = retriever.retrieve(query)
-    except Exception as exc:
-        logger.error("Retrieval failed during image generation: %s", exc)
-        raise RuntimeError("An error occurred while retrieving relevant information.") from exc
 
-    if not chunks:
-        raise ValueError("No relevant context was found in the indexed documents for this request.")
+    Two retrieval modes, chosen by what the query is actually asking for:
+      - A specific unit/chapter/section is named (e.g. "infographic for
+        unit 2", "give me an image for unit1") -> normal retrieval via
+        retriever.retrieve(), which scopes by that unit/chapter/section
+        number (filenames are not used for matching in this deployment).
+      - No unit/chapter/section is named and the request spans everything
+        (e.g. "infographic of the documents I have") -> sample chunks
+        across every ingested document instead of running one semantic
+        search against a phrase with no topical content.
+    """
+    unit_hint = retriever.extract_unit_hint(query)
+
+    if not unit_hint and _is_all_documents_request(query):
+        logger.info(
+            "Image request spans the whole corpus (no specific document named); "
+            "sampling chunks across all ingested documents."
+        )
+        chunks = _collect_cross_document_chunks(retriever.qdrant_service)
+        if not chunks:
+            raise ValueError(
+                "No indexed documents were found to build an infographic from. "
+                "Upload and process documents first."
+            )
+    else:
+        try:
+            chunks = retriever.retrieve(query)
+        except Exception as exc:
+            logger.error("Retrieval failed during image generation: %s", exc)
+            raise RuntimeError("An error occurred while retrieving relevant information.") from exc
+
+        if not chunks:
+            raise ValueError("No relevant context was found in the indexed documents for this request.")
 
     image_prompt = image_prompt_llm.generate_image_prompt(query, chunks)
-    image_bytes = image_gen_service.generate_image(image_prompt)
+
+    # Reinforce the infographic-style default from image_prompt_system.txt
+    # at the renderer level too, in case the user's request nudges the
+    # model back toward a realistic photo/scene.
+    negative_prompt = (
+        "photorealistic, realistic photo, photograph, cinematic lighting, "
+        "realistic human faces, realistic skin texture, depth of field, "
+        "camera bokeh, film grain, 3D render of real people, blurry, low detail"
+    )
+    image_bytes = image_gen_service.generate_image(image_prompt, negative_prompt=negative_prompt)
     saved_path = save_generated_image(image_bytes, label=query[:40])
 
     return {

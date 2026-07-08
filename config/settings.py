@@ -125,7 +125,7 @@ class Settings:
     #     required. https://pollinations.ai
     #   "aws": Amazon Bedrock Nova Canvas — requires AWS credentials and
     #     Bedrock model access; kept as an opt-in alternative.
-    IMAGE_PROVIDER: str = os.getenv("IMAGE_PROVIDER", "aws")
+    IMAGE_PROVIDER: str = os.getenv("IMAGE_PROVIDER", "huggingface")
 
     # Hugging Face / FLUX.1-dev settings (used when IMAGE_PROVIDER == "huggingface")
     HF_TOKEN: str = os.getenv("HF_TOKEN", "")

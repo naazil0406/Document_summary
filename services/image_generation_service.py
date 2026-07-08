@@ -60,6 +60,17 @@ class HuggingFaceFluxService:
     Providers" permission, and that the token's account has accepted the
     gated license on the model page. See
     https://huggingface.co/docs/inference-providers/en/tasks/text-to-image.
+
+    guidance_scale and num_inference_steps are tuned above FLUX's typical
+    "natural photo" defaults (was 3.5 / 30) because this pipeline mostly
+    asks FLUX for infographics with explicit colors and short in-image
+    text labels, not photorealistic scenes. A higher guidance_scale (7.5)
+    makes FLUX follow literal prompt instructions (named contrast colors,
+    layout, label wording) more closely, and more steps (45) sharpens
+    fine edges like icon outlines and short text/numbers. This does not
+    guarantee perfectly legible text -- FLUX.1-dev is not a dedicated
+    text-rendering model -- but it measurably reduces washed-out
+    low-contrast output and garbled short labels versus the old defaults.
     """
 
     def __init__(
@@ -69,8 +80,8 @@ class HuggingFaceFluxService:
         provider: str = "auto",
         width: int = 1024,
         height: int = 1024,
-        num_inference_steps: int = 30,
-        guidance_scale: float = 3.5,
+        num_inference_steps: int = 45,
+        guidance_scale: float = 7.5,
     ):
         if not api_token:
             raise RuntimeError(
