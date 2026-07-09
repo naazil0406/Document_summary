@@ -393,3 +393,51 @@ class QdrantService:
             filename,
         )
         return hits
+
+    def rename_document(self, old_filename: str, new_filename: str) -> int:
+        """Re-key every point (chunks and TOC entries) belonging to one
+        document from `old_filename` to `new_filename`.
+
+        This updates only the `filename` payload field in place -- it does
+        not re-parse, re-chunk, or re-embed anything. Used by the canonical
+        naming migration to rename already-indexed documents cheaply.
+        Returns the number of points touched.
+        """
+        if not old_filename or not new_filename:
+            raise ValueError("old_filename and new_filename are required")
+        if old_filename == new_filename:
+            return 0
+
+        selector = qdrant_models.FilterSelector(
+            filter=qdrant_models.Filter(
+                must=[
+                    qdrant_models.FieldCondition(
+                        key="filename",
+                        match=qdrant_models.MatchValue(value=old_filename),
+                    )
+                ]
+            )
+        )
+        try:
+            count_before = self.client.count(
+                collection_name=self.collection_name,
+                count_filter=selector.filter,
+                exact=True,
+            ).count
+            self.client.set_payload(
+                collection_name=self.collection_name,
+                payload={"filename": new_filename},
+                points=selector,
+                wait=True,
+            )
+            logger.info(
+                "Re-keyed %d point(s) from '%s' to '%s'.",
+                count_before, old_filename, new_filename,
+            )
+            return count_before
+        except Exception as exc:
+            logger.error(
+                "Failed to rename document '%s' -> '%s' in Qdrant: %s",
+                old_filename, new_filename, exc,
+            )
+            raise

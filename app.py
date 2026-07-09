@@ -62,7 +62,9 @@ from services.llm_service import (  # noqa: E402
 from services.document_resolver import (  # noqa: E402
     resolve_pdf_reference,
     resolve_summary_request,
+    ambiguous_candidates,
 )
+from services.canonical_naming import canonical_filename, is_canonical  # noqa: E402
 
 
 # ===========================================================================
@@ -604,11 +606,36 @@ with st.sidebar:
                 with st.spinner("Fetching documents from S3..."):
                     downloaded = s3_storage.sync_down(settings.PDF_FOLDER)
 
+                # Anything landing locally from S3 might still carry a raw,
+                # non-canonical name (e.g. someone dropped a file straight
+                # into the bucket). Rename those to canonical form --
+                # locally, in S3, and in Qdrant if already indexed under the
+                # old name -- before deciding what still needs ingestion.
+                qdrant_service = get_qdrant_service()
+                local_files = [
+                    f for f in os.listdir(settings.PDF_FOLDER) if f.lower().endswith(SUPPORTED_EXTENSIONS)
+                ]
+                renamed = {}
+                for old_name in local_files:
+                    if is_canonical(old_name):
+                        continue
+                    new_name = canonical_filename(old_name)
+                    old_path = os.path.join(settings.PDF_FOLDER, old_name)
+                    new_path = os.path.join(settings.PDF_FOLDER, new_name)
+                    try:
+                        os.rename(old_path, new_path)
+                        s3_storage.rename_file(old_name, new_name)
+                        qdrant_service.rename_document(old_name, new_name)
+                        renamed[old_name] = new_name
+                    except Exception as exc:
+                        st.warning(f"Could not rename '{old_name}' to canonical form: {exc}", icon="⚠️")
+                if renamed:
+                    st.toast(f"Renamed {len(renamed)} document(s) to canonical form.", icon="🏷️")
+
                 local_files = [
                     f for f in os.listdir(settings.PDF_FOLDER) if f.lower().endswith(SUPPORTED_EXTENSIONS)
                 ]
                 embedding_service = get_embedding_service()
-                qdrant_service = get_qdrant_service()
                 pending = files_needing_ingestion(local_files, qdrant_service)
 
                 if pending:
@@ -646,7 +673,11 @@ with st.sidebar:
 
     if uploaded_file is not None:
         if st.button("Process", type="primary", use_container_width=True):
-            dest_path = os.path.join(settings.PDF_FOLDER, uploaded_file.name)
+            # Rename to canonical "Unit N - 123456.ext" form up front, so the
+            # name used for local storage, S3, ingestion, and Qdrant is
+            # always unambiguous -- never the raw uploaded name.
+            canonical_name = canonical_filename(uploaded_file.name)
+            dest_path = os.path.join(settings.PDF_FOLDER, canonical_name)
 
             with open(dest_path, "wb") as f:
                 f.write(uploaded_file.getbuffer())
@@ -659,20 +690,23 @@ with st.sidebar:
             # a file can exist locally but have never made it into Qdrant
             # (e.g. a previous ingestion attempt failed, or the collection
             # was reset), in which case it still needs to be chunked.
-            already_ingested = uploaded_file.name not in files_needing_ingestion(
-                [uploaded_file.name], qdrant_service
+            already_ingested = canonical_name not in files_needing_ingestion(
+                [canonical_name], qdrant_service
             )
 
             if s3_storage:
                 try:
-                    s3_uri = s3_storage.upload_file(dest_path, uploaded_file.name)
+                    s3_uri = s3_storage.upload_file(dest_path, canonical_name)
                     st.toast(f"Backed up to {s3_uri}", icon="📦")
                 except Exception as exc:
                     st.warning(f"Saved locally, but S3 upload failed: {exc}", icon="⚠️")
 
+            if canonical_name != uploaded_file.name:
+                st.caption(f"Saved as '{canonical_name}' (from '{uploaded_file.name}').")
+
             try:
                 if not already_ingested:
-                    with st.spinner(f"Reading and indexing '{uploaded_file.name}'..."):
+                    with st.spinner(f"Reading and indexing '{canonical_name}'..."):
                         n_chunks = ingest_document_by_extension(
                             dest_path, embedding_service, qdrant_service
                         )
@@ -680,12 +714,12 @@ with st.sidebar:
                         st.error("No extractable content found in this document.")
                         st.stop()
                     st.success(
-                        f"Indexed {n_chunks} chunks from '{uploaded_file.name}'. "
+                        f"Indexed {n_chunks} chunks from '{canonical_name}'. "
                         "Ask a question or request a summary in the chat below.",
                         icon="✅",
                     )
                 else:
-                    st.info(f"'{uploaded_file.name}' is already indexed.", icon="ℹ️")
+                    st.info(f"'{canonical_name}' is already indexed.", icon="ℹ️")
             except Exception as exc:
                 st.error(f"Something went wrong while processing the document: {exc}")
 
@@ -878,11 +912,19 @@ if question_to_answer:
                             else:
                                 answer = "No indexed content found. Please upload and process at least one PDF first."
                         else:
-                            available = ", ".join(existing) or "none"
-                            answer = (
-                                "I couldn't uniquely match that document name. "
-                                f"Available documents: {available}"
-                            )
+                            tied = ambiguous_candidates(question_to_answer, existing)
+                            if tied:
+                                options = ", ".join(tied)
+                                answer = (
+                                    "More than one document shares that unit number. "
+                                    f"Please specify which one by its unique id: {options}"
+                                )
+                            else:
+                                available = ", ".join(existing) or "none"
+                                answer = (
+                                    "I couldn't uniquely match that document name. "
+                                    f"Available documents: {available}"
+                                )
                 else:
                     answer = answer_question(
                         retriever, qa_llm, summary_llm, question_to_answer

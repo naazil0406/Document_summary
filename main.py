@@ -48,7 +48,9 @@ from services.llm_service import (
 from services.document_resolver import (
     resolve_pdf_reference,
     resolve_summary_request,
+    ambiguous_candidates,
 )
+from services.canonical_naming import canonical_filename, is_canonical
 from services.image_generation_service import HuggingFaceFluxService, PollinationsImageService, NovaCanvasService
 
 logger = logging.getLogger(__name__)
@@ -469,13 +471,90 @@ def _collect_cross_document_chunks(
 def save_narrative_script(script_text: str, label: str) -> str:
     os.makedirs(settings.NARRATIVE_SCRIPTS_DIR, exist_ok=True)
     safe_label = re.sub(r"[^A-Za-z0-9_-]+", "_", label).strip("_") or "script"
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"training_script_{safe_label}_{timestamp}.txt"
+    filename = f"{safe_label}_script.txt"
     path = os.path.join(settings.NARRATIVE_SCRIPTS_DIR, filename)
+
+    # Two generations with the same name shouldn't silently clobber each
+    # other now that saved scripts are the permanent, browsable record.
+    counter = 2
+    while os.path.exists(path):
+        filename = f"{safe_label}_script_{counter}.txt"
+        path = os.path.join(settings.NARRATIVE_SCRIPTS_DIR, filename)
+        counter += 1
+
     with open(path, "w", encoding="utf-8") as f:
         f.write(script_text)
     logger.info("Saved training script to '%s'.", path)
     return path
+
+
+_LEGACY_SCRIPT_PATTERN = re.compile(r"^(?:training_script|video_script)_(.+)_\d{8}_\d{6}$")
+
+
+def _migrate_legacy_script_filenames() -> None:
+    """Rename scripts saved under the old 'training_script_{label}_{timestamp}.txt'
+    / 'video_script_{label}_{timestamp}.txt' pattern to the current
+    '{label}_script.txt' form, so every already-saved script shows up in the
+    UI under the same naming convention as new ones."""
+    folder = settings.NARRATIVE_SCRIPTS_DIR
+    if not os.path.isdir(folder):
+        return
+
+    for filename in sorted(os.listdir(folder)):
+        if not filename.lower().endswith(".txt"):
+            continue
+        stem = filename[: -len(".txt")]
+        match = _LEGACY_SCRIPT_PATTERN.match(stem)
+        if not match:
+            continue
+
+        label = match.group(1)
+        new_name = f"{label}_script.txt"
+        old_path = os.path.join(folder, filename)
+        new_path = os.path.join(folder, new_name)
+
+        if os.path.exists(new_path) and new_path != old_path:
+            counter = 2
+            while os.path.exists(new_path):
+                new_name = f"{label}_script_{counter}.txt"
+                new_path = os.path.join(folder, new_name)
+                counter += 1
+
+        try:
+            os.rename(old_path, new_path)
+            logger.info("Migrated legacy script '%s' -> '%s'.", filename, new_name)
+        except OSError as exc:
+            logger.warning("Could not migrate legacy script '%s': %s", filename, exc)
+
+
+def _list_saved_scripts() -> List[dict]:
+    """Every script currently saved on disk, oldest first -- this is the
+    source of truth for what shows up in the Video Script rail, so scripts
+    persist across restarts instead of only lasting one server session."""
+    folder = settings.NARRATIVE_SCRIPTS_DIR
+    if not os.path.isdir(folder):
+        return []
+
+    entries = []
+    for filename in os.listdir(folder):
+        if not filename.endswith("_script.txt"):
+            continue
+        path = os.path.join(folder, filename)
+        if not os.path.isfile(path):
+            continue
+        label = filename[: -len("_script.txt")].replace("_", " ")
+        created_at = datetime.fromtimestamp(os.path.getmtime(path)).isoformat()
+        entries.append(
+            {
+                "id": filename,
+                "label": label,
+                "saved_path": path,
+                "created_at": created_at,
+            }
+        )
+
+    entries.sort(key=lambda e: e["created_at"])
+    return entries
 
 
 def save_generated_image(image_bytes: bytes, label: str) -> str:
@@ -654,10 +733,6 @@ app.add_middleware(
 # In-process cache: filename -> {"summary": str, "questions": list}
 _summary_cache: dict = {}
 
-# In-process store of every transcript generated this run, newest last.
-# Each entry: {"id", "label", "script", "saved_path", "created_at"}
-_transcripts: List[dict] = []
-
 
 class ChatRequest(BaseModel):
     question: str
@@ -674,6 +749,10 @@ class SummarizeResponse(BaseModel):
     filename: str
     summary: str
     questions: List[str]
+
+
+class TranscriptRequest(BaseModel):
+    name: Optional[str] = None
 
 
 class TranscriptResponse(BaseModel):
@@ -703,6 +782,7 @@ class ImageGenResponse(BaseModel):
 @app.on_event("startup")
 def on_startup():
     os.makedirs(settings.PDF_FOLDER, exist_ok=True)
+    _migrate_legacy_script_filenames()
 
 
 @app.get("/api/status")
@@ -730,10 +810,15 @@ def list_documents():
 
 @app.post("/api/documents/upload")
 async def upload_document(file: UploadFile = File(...)):
-    filename = os.path.basename(file.filename)
-    ext = os.path.splitext(filename)[1].lower()
+    original_filename = os.path.basename(file.filename)
+    ext = os.path.splitext(original_filename)[1].lower()
     if ext not in SUPPORTED_EXTENSIONS:
         raise HTTPException(400, f"Unsupported file type '{ext}'.")
+
+    # Rename to canonical "Unit N - 123456.ext" form up front, so the
+    # filename used for local storage, S3, ingestion, and Qdrant is always
+    # unambiguous -- never the raw uploaded name.
+    filename = canonical_filename(original_filename)
 
     os.makedirs(settings.PDF_FOLDER, exist_ok=True)
     dest_path = os.path.join(settings.PDF_FOLDER, filename)
@@ -758,6 +843,7 @@ async def upload_document(file: UploadFile = File(...)):
     if already_ingested:
         return {
             "filename": filename,
+            "original_filename": original_filename,
             "already_indexed": True,
             "chunks": 0,
             "s3_uri": s3_uri,
@@ -774,6 +860,7 @@ async def upload_document(file: UploadFile = File(...)):
 
     return {
         "filename": filename,
+        "original_filename": original_filename,
         "already_indexed": False,
         "chunks": n_chunks,
         "s3_uri": s3_uri,
@@ -848,9 +935,31 @@ def sync_from_s3():
     except Exception as exc:
         raise HTTPException(502, f"Could not sync from S3: {exc}")
 
+    # Anything landing in the local folder from S3 might still carry a raw,
+    # non-canonical name (e.g. someone dropped a file straight into the
+    # bucket). Rename those to canonical form -- locally, in S3, and in
+    # Qdrant if it was already indexed under the old name -- before deciding
+    # what still needs ingestion.
+    qdrant_service = get_qdrant_service()
+    renamed = {}
+    for filename in list(existing_documents()):
+        if is_canonical(filename):
+            continue
+        new_name = canonical_filename(filename)
+        old_path = os.path.join(settings.PDF_FOLDER, filename)
+        new_path = os.path.join(settings.PDF_FOLDER, new_name)
+        try:
+            os.rename(old_path, new_path)
+            s3_storage.rename_file(filename, new_name)
+            qdrant_service.rename_document(filename, new_name)
+            renamed[filename] = new_name
+            if filename in downloaded:
+                downloaded[downloaded.index(filename)] = new_name
+        except Exception as exc:
+            logger.warning("Could not rename '%s' to canonical form: %s", filename, exc)
+
     local_files = existing_documents()
     embedding_service = get_embedding_service()
-    qdrant_service = get_qdrant_service()
     pending = files_needing_ingestion(local_files, qdrant_service)
 
     indexed = []
@@ -865,14 +974,30 @@ def sync_from_s3():
 
     return {
         "downloaded": downloaded,
+        "renamed": renamed,
         "indexed": indexed,
         "errors": errors,
-        "up_to_date": not downloaded and not pending,
+        "up_to_date": not downloaded and not pending and not renamed,
     }
 
 
+_STORY_HEADER_PATTERN = re.compile(r"^Story\s*-\s*(.+?)\.mp4\s*$", re.IGNORECASE | re.MULTILINE)
+
+
+def _extract_story_name(script_text: str) -> Optional[str]:
+    """Pull the invented character's name out of the script's required first
+    line ('Story - <name>.mp4', per prompts/presentation_prompt.txt), so
+    generated scripts are auto-named after their story instead of a generic
+    'Transcript N' when the user doesn't type a name."""
+    match = _STORY_HEADER_PATTERN.search(script_text)
+    if not match:
+        return None
+    name = match.group(1).strip()
+    return name or None
+
+
 @app.post("/api/transcript", response_model=TranscriptResponse)
-def generate_transcript():
+def generate_transcript(req: TranscriptRequest = TranscriptRequest()):
     qdrant_service = get_qdrant_service()
     presentation_llm = get_presentation_llm()
 
@@ -893,16 +1018,18 @@ def generate_transcript():
     except Exception as exc:
         raise HTTPException(500, f"Something went wrong while generating the training script: {exc}")
 
-    saved_path = save_narrative_script(script, "All Documents")
+    custom_name = (req.name or "").strip()
+    story_name = _extract_story_name(script)
+    label = custom_name or story_name or f"Transcript {len(_list_saved_scripts()) + 1}"
+    saved_path = save_narrative_script(script, label)
 
     entry = {
-        "id": str(uuid.uuid4()),
-        "label": f"Transcript {len(_transcripts) + 1}",
+        "id": os.path.basename(saved_path),
+        "label": os.path.basename(saved_path)[: -len("_script.txt")].replace("_", " "),
         "script": script,
         "saved_path": saved_path,
-        "created_at": datetime.now().isoformat(),
+        "created_at": datetime.fromtimestamp(os.path.getmtime(saved_path)).isoformat(),
     }
-    _transcripts.append(entry)
     return TranscriptResponse(**entry)
 
 
@@ -911,17 +1038,28 @@ def list_transcripts():
     return {
         "transcripts": [
             TranscriptSummary(id=t["id"], label=t["label"], created_at=t["created_at"])
-            for t in _transcripts
+            for t in _list_saved_scripts()
         ]
     }
 
 
 @app.get("/api/transcripts/{transcript_id}", response_model=TranscriptResponse)
 def get_transcript(transcript_id: str):
-    for t in _transcripts:
+    for t in _list_saved_scripts():
         if t["id"] == transcript_id:
-            return TranscriptResponse(**t)
-    raise HTTPException(404, "Transcript not found.")
+            try:
+                with open(t["saved_path"], "r", encoding="utf-8") as f:
+                    script_text = f.read()
+            except OSError as exc:
+                raise HTTPException(500, f"Could not read saved script: {exc}")
+            return TranscriptResponse(
+                id=t["id"],
+                label=t["label"],
+                script=script_text,
+                saved_path=t["saved_path"],
+                created_at=t["created_at"],
+            )
+    raise HTTPException(404, "Video script not found.")
 
 
 @app.post("/api/chat", response_model=ChatResponse)
@@ -973,6 +1111,17 @@ def chat(req: ChatRequest):
                     )
                 return ChatResponse(
                     answer="No indexed content found. Please upload and process at least one document first.",
+                    type="info",
+                )
+
+            tied = ambiguous_candidates(question, docs)
+            if tied:
+                options = ", ".join(tied)
+                return ChatResponse(
+                    answer=(
+                        "More than one document shares that unit number. "
+                        f"Please specify which one by its unique id: {options}"
+                    ),
                     type="info",
                 )
 

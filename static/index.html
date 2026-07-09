@@ -518,7 +518,7 @@ button { font-family: inherit; cursor: pointer; }
 }
 
 /* ============================================================
-   Transcript panel
+   Video Script panel
    ============================================================ */
 #panel-transcript.panel.is-active {
   display: grid;
@@ -778,7 +778,7 @@ button { font-family: inherit; cursor: pointer; }
         <span class="rail-nav-dot"></span>AWS Sync
       </button>
       <button class="rail-nav-item" data-panel="transcript">
-        <span class="rail-nav-dot"></span>Transcript
+        <span class="rail-nav-dot"></span>Video Script
       </button>
       <button class="rail-nav-item" data-panel="image">
         <span class="rail-nav-dot"></span>Image
@@ -883,22 +883,26 @@ button { font-family: inherit; cursor: pointer; }
       </div>
     </section>
 
-    <!-- ---------- TRANSCRIPT PANEL ---------- -->
+    <!-- ---------- VIDEO SCRIPT PANEL ---------- -->
     <section class="panel" id="panel-transcript">
       <header class="panel-head">
-        <h1>Generate a training transcript</h1>
-        <p>Weaves everything in your library into a single narrated training script. The format stays fixed; the story is freshly invented on every run — each run is saved below so you can revisit earlier ones.</p>
-        <button class="primary-btn" id="generateTranscriptBtn">Generate transcript</button>
+        <h1>Generate a video script</h1>
+        <p>Weaves everything in your library into a single narrated video script. The format stays fixed; the story is freshly invented on every run — each run is saved below so you can revisit earlier ones.</p>
+        <div style="display:flex; gap:10px; align-items:center;">
+          <input type="text" id="transcriptNameInput" placeholder="Name this script (e.g. Priya Novak)" autocomplete="off"
+                 style="flex:1; font-family:var(--font-body); font-size:14px; padding:10px 14px; border-radius:8px; border:1px solid var(--paper-rule); background:var(--paper-raised); color:var(--ink-text);" />
+          <button class="primary-btn" id="generateTranscriptBtn">Generate video script</button>
+        </div>
       </header>
 
       <div class="transcript-main">
         <div class="transcript-empty" id="transcriptEmpty">
-          <p>No transcript generated yet this session.</p>
+          <p>No video script generated yet this session.</p>
         </div>
 
         <article class="transcript-card" id="transcriptCard" hidden>
           <div class="transcript-card-head">
-            <span class="transcript-card-tag" id="transcriptCardTag">Transcript</span>
+            <span class="transcript-card-tag" id="transcriptCardTag">Video Script</span>
             <a href="#" class="ghost-btn" id="transcriptDownload">Download .txt</a>
           </div>
           <pre class="transcript-card-text" id="transcriptText"></pre>
@@ -906,7 +910,7 @@ button { font-family: inherit; cursor: pointer; }
       </div>
 
       <aside class="transcript-rail">
-        <div class="transcript-rail-title">Generated transcripts</div>
+        <div class="transcript-rail-title">Generated video scripts</div>
         <div class="transcript-rail-list" id="transcriptList">
           <div class="transcript-rail-empty">Nothing generated yet.</div>
         </div>
@@ -1238,7 +1242,7 @@ button { font-family: inherit; cursor: pointer; }
     }
   });
 
-  // ---- Transcript ----
+  // ---- Video Script ----
   const transcriptList = document.getElementById("transcriptList");
   const transcriptEmpty = document.getElementById("transcriptEmpty");
   const transcriptCard = document.getElementById("transcriptCard");
@@ -1277,7 +1281,7 @@ button { font-family: inherit; cursor: pointer; }
       const entry = await api(`/api/transcripts/${encodeURIComponent(id)}`);
       renderTranscript(entry);
     } catch (exc) {
-      alert("Could not load transcript: " + exc.message);
+      alert("Could not load video script: " + exc.message);
     }
   }
 
@@ -1315,17 +1319,24 @@ button { font-family: inherit; cursor: pointer; }
   document.getElementById("generateTranscriptBtn").addEventListener("click", async (e) => {
     e.preventDefault();
     const btn = e.target;
+    const nameInput = document.getElementById("transcriptNameInput");
+    const name = nameInput.value.trim();
     btn.disabled = true;
     btn.textContent = "Generating…";
     try {
-      const entry = await api("/api/transcript", { method: "POST" });
+      const entry = await api("/api/transcript", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: name || null }),
+      });
       await refreshTranscriptList();
       renderTranscript(entry);
+      nameInput.value = "";
     } catch (exc) {
-      alert("Could not generate transcript: " + exc.message);
+      alert("Could not generate video script: " + exc.message);
     } finally {
       btn.disabled = false;
-      btn.textContent = "Generate transcript";
+      btn.textContent = "Generate video script";
     }
   });
 

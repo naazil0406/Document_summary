@@ -24,6 +24,7 @@ from services.chunking import Chunk, DocumentChunker, SemanticChunkingService
 from services.embeddings import EmbeddingService
 from services.qdrant_db import QdrantService
 from services.s3_storage import S3Storage
+from services.canonical_naming import canonical_filename, is_canonical
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +124,42 @@ def sync_from_s3() -> None:
         logger.info("Nothing new to download; local PDF_FOLDER already up to date with S3.")
 
 
+def _rename_to_canonical(folder: str, qdrant_service: QdrantService) -> None:
+    """Rename any non-canonical file in `folder` to "Unit N - 123456.ext"
+    form -- locally, in S3 (if configured), and in Qdrant if it was already
+    indexed under the old name. Documents ingested before the canonical
+    naming scheme was introduced get normalized the next time ingestion runs."""
+    if not os.path.isdir(folder):
+        return
+
+    s3_storage = None
+    if settings.S3_BUCKET_NAME:
+        s3_storage = S3Storage(
+            bucket_name=settings.S3_BUCKET_NAME,
+            prefix=settings.S3_PREFIX,
+        )
+
+    for old_name in sorted(os.listdir(folder)):
+        old_path = os.path.join(folder, old_name)
+        if not os.path.isfile(old_path):
+            continue
+        if os.path.splitext(old_name)[1].lower() not in SUPPORTED_INGESTION_EXTENSIONS:
+            continue
+        if is_canonical(old_name):
+            continue
+
+        new_name = canonical_filename(old_name)
+        new_path = os.path.join(folder, new_name)
+        try:
+            os.rename(old_path, new_path)
+            if s3_storage:
+                s3_storage.rename_file(old_name, new_name)
+            qdrant_service.rename_document(old_name, new_name)
+            logger.info("Renamed '%s' -> '%s' (canonical form).", old_name, new_name)
+        except Exception as exc:
+            logger.warning("Could not rename '%s' to canonical form: %s", old_name, exc)
+
+
 def run_ingestion() -> None:
     logger.info("Starting ingestion pipeline.")
 
@@ -133,6 +170,14 @@ def run_ingestion() -> None:
         device=settings.EMBEDDING_DEVICE,
     )
 
+    qdrant_service = QdrantService(
+        url=settings.QDRANT_URL,
+        collection_name=settings.QDRANT_COLLECTION_NAME,
+        api_key=settings.QDRANT_API_KEY,
+    )
+
+    _rename_to_canonical(settings.PDF_FOLDER, qdrant_service)
+
     ingestable_files = _list_ingestable_files(settings.PDF_FOLDER)
     if not ingestable_files:
         logger.warning(
@@ -142,12 +187,6 @@ def run_ingestion() -> None:
         return
 
     logger.info("Found %d supported file(s) to ingest.", len(ingestable_files))
-
-    qdrant_service = QdrantService(
-        url=settings.QDRANT_URL,
-        collection_name=settings.QDRANT_COLLECTION_NAME,
-        api_key=settings.QDRANT_API_KEY,
-    )
 
     total_chunks = 0
     total_toc_entries = 0

@@ -127,6 +127,27 @@ class S3Storage:
 
         return sorted(filenames)
 
+    def rename_file(self, old_filename: str, new_filename: str) -> None:
+        """Rename an object in S3 by copying it to the new key and deleting
+        the old one (S3 has no atomic rename). Used by the canonical naming
+        migration; no-op if old_filename == new_filename."""
+        if old_filename == new_filename:
+            return
+        old_key = self._key_for(old_filename)
+        new_key = self._key_for(new_filename)
+        try:
+            self.client.copy_object(
+                Bucket=self.bucket_name,
+                CopySource={"Bucket": self.bucket_name, "Key": old_key},
+                Key=new_key,
+            )
+            self.client.delete_object(Bucket=self.bucket_name, Key=old_key)
+        except ClientError as exc:
+            raise RuntimeError(
+                f"Failed to rename '{old_filename}' -> '{new_filename}' in S3: {exc}"
+            ) from exc
+        logger.info("Renamed S3 object '%s' -> '%s'.", old_filename, new_filename)
+
     def sync_down(self, local_folder: str) -> List[str]:
         """Download every S3 object not already present locally into
         local_folder. Returns the list of filenames actually downloaded."""
