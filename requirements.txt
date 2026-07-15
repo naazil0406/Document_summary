@@ -43,3 +43,7 @@ streamlit>=1.36.0
 fastapi>=0.111.0
 uvicorn[standard]>=0.30.0
 python-multipart>=0.0.9
+
+# --- Hugging Face Inference (FLUX.1-dev image generation) ---
+huggingface_hub==1.22.0
+ 

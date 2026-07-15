@@ -19,3 +19,7 @@ data/**
 Narrative_scripts/**
 !Narrative_scripts/
 !Narrative_scripts/.gitkeep
+
+Generated_images/**
+!Generated_images/
+!Generated_images/.gitkeep
