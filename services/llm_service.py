@@ -118,6 +118,27 @@ _IMAGE_PROMPT_SYSTEM_PROMPT_PATH = os.path.join(
     _PROMPTS_DIR, "image_prompt_system.txt"
 )
 
+_CONTENT_GENERATION_SYSTEM_PROMPT_PATH = os.path.join(
+    _PROMPTS_DIR, "content_generation_system.txt"
+)
+
+# The exact set of content types the Learning Content Generation Engine
+# supports (see prompts/content_generation_system.txt). Kept here, not just
+# in main.py, so llm_service can validate/normalize independent of the API
+# layer.
+CONTENT_TYPES = [
+    "Recall Card",
+    "AI Image",
+    "Infographic",
+    "Flashcard",
+    "Scenario",
+    "Spot the Mistake Challenge",
+    "Daily Quiz",
+    "Fun Fact",
+    "Reflection Question",
+    "Safety / Best Practice Tip",
+]
+
 # Seed pool used to force a different illustrative character/workplace into
 # each generated script, so back-to-back runs don't converge on the same
 # story even at low sampling temperature.
@@ -203,6 +224,21 @@ def load_excel_restructuring_system_prompt() -> str:
 
 def load_image_prompt_system_prompt() -> str:
     return _load_prompt_template(_IMAGE_PROMPT_SYSTEM_PROMPT_PATH)
+
+
+def load_content_generation_system_prompt() -> str:
+    return _load_prompt_template(_CONTENT_GENERATION_SYSTEM_PROMPT_PATH)
+
+
+def load_video_story_dual_prompt() -> str:
+    """Dual Video Script + Story mode lives inside presentation_prompt.txt
+    itself (the 'DUAL-OUTPUT MODE' section at the bottom), reusing the same
+    file as generate_presentation() rather than a separate prompt file."""
+    return _load_prompt_template(_PRESENTATION_SYSTEM_PROMPT_PATH)
+
+
+def load_video_story_dual_prompt() -> str:
+    return _load_prompt_template(_PRESENTATION_SYSTEM_PROMPT_PATH)
 
 
 def random_story_seed() -> Tuple[str, str]:
@@ -498,6 +534,104 @@ class BaseLLMService:
         if not image_prompt:
             raise RuntimeError("Nova Lite returned an empty image prompt.")
         return image_prompt
+
+    def generate_learning_content(self, content_type: str, topic: str, chunks: List[dict]) -> str:
+        """Content Generation Agent: turn (Content Type + Topic + retrieved
+        Knowledge Base chunks) into one short, original piece of
+        learner-facing content — never copied from the Knowledge Base or
+        the internet, per prompts/content_generation_system.txt.
+
+        Like generate_image_prompt(), this prompt pair has no separate
+        user-prompt .txt template; the system prompt fully specifies the
+        task and the user turn is just the dynamic inputs.
+        """
+        if content_type not in CONTENT_TYPES:
+            raise ValueError(
+                f"Unsupported content type '{content_type}'. "
+                f"Supported types: {', '.join(CONTENT_TYPES)}"
+            )
+
+        system_prompt = load_content_generation_system_prompt()
+        retrieved_chunks = format_context(chunks)
+        user_prompt = (
+            f"Content Type: {content_type}\n"
+            f"Topic: {topic}\n\n"
+            f"Retrieved Context:\n{retrieved_chunks}"
+        )
+        content_text = self._call_llm(system_prompt, user_prompt).strip()
+
+        # Defensive cleanup: models occasionally wrap output in quotes,
+        # markdown headings, or code fences even when told not to.
+        if content_text.startswith("```"):
+            content_text = re.sub(r"^```(?:\w+)?\s*", "", content_text)
+            content_text = re.sub(r"\s*```$", "", content_text)
+        content_text = re.sub(rf"^{re.escape(content_type)}\s*:\s*", "", content_text, flags=re.IGNORECASE)
+        content_text = content_text.strip().strip('"').strip()
+
+        if not content_text:
+            raise RuntimeError(f"The model returned no content for '{content_type}' on topic '{topic}'.")
+        return content_text
+
+    def generate_video_and_story(self, learning_objectives: str, chunks: List[dict]) -> Tuple[str, str]:
+        """Generate the dual Video Script + Story training output
+        (the 'DUAL-OUTPUT MODE' section of prompts/presentation_prompt.txt)
+        in a single LLM call, then split the response into
+        (video_script, story).
+
+        No topic is passed in — the model selects whatever topic/lesson the
+        Knowledge Base content best supports on its own.
+
+        Unlike the QA/summary prompt pairs, this template embeds learning
+        objectives and retrieved Knowledge Base content directly via
+        .format() and is sent as one filled-in system prompt, with a short
+        static user turn — same "single self-contained prompt" pattern
+        used by restructure_excel_content().
+        """
+        template = load_video_story_dual_prompt()
+        seed_character_name, seed_workplace = random_story_seed()
+        system_prompt = template.format(
+            topic="Not specified — choose whichever topic the Knowledge Base Content best supports.",
+            learning_objectives=learning_objectives.strip() if learning_objectives and learning_objectives.strip()
+            else "Not explicitly given — infer sensible objectives from the Knowledge Base Content.",
+            retrieved_chunks=format_context(chunks),
+            # The template also contains {seed_character_name}/{seed_workplace}
+            # from single-script mode (str.format requires every placeholder
+            # in the string to be supplied); dual-mode's own instructions
+            # tell the model to invent a fresh name/workplace anyway, so
+            # these seeds are unused filler here, not a real constraint.
+            seed_character_name=seed_character_name,
+            seed_workplace=seed_workplace,
+        )
+        user_prompt = "Generate the LEFT PANEL video script and the RIGHT PANEL story now, following the required format exactly."
+        raw_output = self._call_llm(system_prompt, user_prompt)
+        return self._split_video_story_panels(raw_output)
+
+    @staticmethod
+    def _split_video_story_panels(raw_output: str) -> Tuple[str, str]:
+        """Split a raw 'LEFT PANEL ... RIGHT PANEL ...' response into
+        (video_script, story), tolerant of minor header formatting drift
+        (extra dashes, different casing, a trailing colon)."""
+        left_marker = re.compile(r"^\s*[-=]*\s*LEFT\s+PANEL\s*[-=:]*\s*$", re.IGNORECASE | re.MULTILINE)
+        right_marker = re.compile(r"^\s*[-=]*\s*RIGHT\s+PANEL\s*[-=:]*\s*$", re.IGNORECASE | re.MULTILINE)
+
+        right_match = right_marker.search(raw_output)
+        if not right_match:
+            # Model didn't use the exact header — safest fallback is to
+            # return the whole thing as the video script and flag the story
+            # as missing, rather than silently guessing at a split point.
+            return raw_output.strip(), (
+                "The model did not return a separately labeled story section. "
+                "Try regenerating."
+            )
+
+        video_part = raw_output[: right_match.start()]
+        story_part = raw_output[right_match.end():]
+
+        left_match = left_marker.search(video_part)
+        if left_match:
+            video_part = video_part[left_match.end():]
+
+        return video_part.strip(), story_part.strip()
 
 
 # ===========================================================================

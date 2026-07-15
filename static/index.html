@@ -621,6 +621,157 @@ button { font-family: inherit; cursor: pointer; }
 }
 
 /* ============================================================
+   Video Script & Story panel (dual output)
+   ============================================================ */
+#panel-videostory.panel.is-active {
+  display: grid;
+  grid-template-columns: 1fr 260px;
+  gap: 32px;
+  max-width: 1200px;
+  align-items: start;
+}
+#panel-videostory .panel-head { grid-column: 1 / -1; margin-bottom: 0; }
+#panel-videostory .vs-main { min-width: 0; }
+
+@media (max-width: 900px) {
+  #panel-videostory.panel.is-active { grid-template-columns: 1fr; }
+}
+
+.vs-composer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 20px;
+}
+.vs-composer input {
+  background: var(--paper-raised);
+  border: 1px solid var(--paper-rule);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-family: var(--font-body);
+  font-size: 14px;
+  color: var(--ink);
+}
+.vs-composer input[name="topic"] { flex: 1 1 220px; }
+.vs-composer input[name="objectives"] { flex: 2 1 320px; }
+.vs-composer input:focus { outline: none; border-color: var(--gold); }
+
+.vs-empty {
+  border: 1px dashed var(--paper-rule);
+  border-radius: var(--radius);
+  padding: 30px 24px;
+  text-align: center;
+}
+
+.vs-panels {
+  display: block;
+}
+.vs-toggle {
+  display: inline-flex;
+  gap: 4px;
+  background: var(--paper-raised);
+  border: 1px solid var(--paper-rule);
+  border-radius: 8px;
+  padding: 3px;
+  margin-bottom: 14px;
+}
+.vs-toggle-btn {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 6px 14px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--ink-text-soft);
+  cursor: pointer;
+}
+.vs-toggle-btn.is-active {
+  background: var(--gold);
+  color: var(--paper);
+}
+.vs-card {
+  background: var(--paper-raised);
+  border: 1px solid var(--paper-rule);
+  border-radius: var(--radius);
+  padding: 18px 20px;
+  min-width: 0;
+}
+.vs-card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; gap: 8px; }
+.vs-card-tag {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--gold-deep);
+  background: rgba(184,134,43,0.12);
+  padding: 2px 7px;
+  border-radius: 4px;
+}
+.vs-card-text {
+  font-family: var(--font-body);
+  font-size: 13.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  margin: 0;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.vs-rail {
+  border-left: 1px solid var(--paper-rule);
+  padding-left: 24px;
+}
+.vs-rail-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-text-soft);
+  margin-bottom: 12px;
+}
+.vs-rail-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+.vs-rail-empty {
+  font-size: 13px;
+  color: var(--ink-text-soft);
+}
+.vs-rail-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: var(--paper-raised);
+  border: 1px solid var(--paper-rule);
+  border-radius: 8px;
+  padding: 10px 12px;
+  cursor: pointer;
+}
+.vs-rail-item:hover { border-color: var(--slate); }
+.vs-rail-item.is-active {
+  border-color: var(--gold);
+  background: rgba(184,134,43,0.08);
+}
+.vs-rail-item-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vs-rail-item-time {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-text-soft);
+  margin-top: 2px;
+}
+
+/* ============================================================
    Image panel
    ============================================================ */
 #panel-image.panel.is-active {
@@ -751,6 +902,171 @@ button { font-family: inherit; cursor: pointer; }
   white-space: nowrap;
 }
 
+/* ============================================================
+   Learning Feed (content generation) panel
+   ============================================================ */
+#panel-content.panel.is-active {
+  display: grid;
+  grid-template-columns: 1fr 300px;
+  gap: 32px;
+  max-width: 1040px;
+  align-items: start;
+}
+#panel-content .panel-head { grid-column: 1 / -1; margin-bottom: 0; }
+#panel-content .content-main { min-width: 0; }
+
+@media (max-width: 860px) {
+  #panel-content.panel.is-active { grid-template-columns: 1fr; }
+}
+
+.content-composer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 20px;
+}
+.content-composer select,
+.content-composer input {
+  background: var(--paper-raised);
+  border: 1px solid var(--paper-rule);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-family: var(--font-body);
+  font-size: 14px;
+  color: var(--ink);
+}
+.content-composer select { flex: 0 0 220px; }
+.content-composer input { flex: 1; min-width: 200px; }
+.content-composer select:focus,
+.content-composer input:focus { outline: none; border-color: var(--gold); }
+
+.content-empty {
+  border: 1px dashed var(--paper-rule);
+  border-radius: var(--radius);
+  padding: 30px 24px;
+  text-align: center;
+}
+
+.content-card {
+  background: var(--paper-raised);
+  border: 1px solid var(--paper-rule);
+  border-radius: var(--radius);
+  padding: 18px 20px;
+}
+.content-card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; gap: 10px; flex-wrap: wrap; }
+.content-card-tag {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--gold-deep);
+  background: rgba(184,134,43,0.12);
+  padding: 2px 7px;
+  border-radius: 4px;
+}
+.content-card-topic {
+  font-size: 13px;
+  color: var(--ink-text-soft);
+}
+.content-card-picture {
+  width: 100%;
+  border-radius: 8px;
+  border: 1px solid var(--paper-rule);
+  display: block;
+  margin-bottom: 14px;
+}
+.content-card-text {
+  font-family: var(--font-body);
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--ink);
+  white-space: pre-wrap;
+  margin: 0 0 12px 0;
+}
+.content-card-prompt-toggle {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-text-soft);
+  cursor: pointer;
+  user-select: none;
+}
+.content-card-prompt {
+  font-family: var(--font-body);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ink-text-soft);
+  white-space: pre-wrap;
+  margin: 8px 0 0 0;
+  max-height: 24vh;
+  overflow-y: auto;
+}
+
+.content-rail {
+  border-left: 1px solid var(--paper-rule);
+  padding-left: 24px;
+}
+.content-rail-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-text-soft);
+  margin-bottom: 12px;
+}
+.content-rail-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+.content-rail-empty {
+  font-size: 13px;
+  color: var(--ink-text-soft);
+}
+.content-rail-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  background: var(--paper-raised);
+  border: 1px solid var(--paper-rule);
+  border-radius: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+.content-rail-item:hover { border-color: var(--slate); }
+.content-rail-item.is-active {
+  border-color: var(--gold);
+  background: rgba(184,134,43,0.08);
+}
+.content-rail-item-thumb {
+  width: 36px;
+  height: 36px;
+  border-radius: 6px;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+.content-rail-item-label {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.content-rail-item-type {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--gold-deep);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.content-rail-item-topic {
+  font-size: 13px;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 </style>
 </head>
 <body>
@@ -777,11 +1093,14 @@ button { font-family: inherit; cursor: pointer; }
       <button class="rail-nav-item" data-panel="sync">
         <span class="rail-nav-dot"></span>AWS Sync
       </button>
-      <button class="rail-nav-item" data-panel="transcript">
-        <span class="rail-nav-dot"></span>Video Script
+      <button class="rail-nav-item" data-panel="videostory">
+        <span class="rail-nav-dot"></span>Video Script &amp; Story
       </button>
       <button class="rail-nav-item" data-panel="image">
         <span class="rail-nav-dot"></span>Image
+      </button>
+      <button class="rail-nav-item" data-panel="content">
+        <span class="rail-nav-dot"></span>Learning Feed
       </button>
     </nav>
 
@@ -883,36 +1202,50 @@ button { font-family: inherit; cursor: pointer; }
       </div>
     </section>
 
-    <!-- ---------- VIDEO SCRIPT PANEL ---------- -->
-    <section class="panel" id="panel-transcript">
+    <!-- ---------- VIDEO SCRIPT & STORY PANEL (toggle) ---------- -->
+    <section class="panel" id="panel-videostory">
       <header class="panel-head">
-        <h1>Generate a video script</h1>
-        <p>Weaves everything in your library into a single narrated video script. The format stays fixed; the story is freshly invented on every run — each run is saved below so you can revisit earlier ones.</p>
-        <div style="display:flex; gap:10px; align-items:center;">
-          <input type="text" id="transcriptNameInput" placeholder="Name this script (e.g. Priya Novak)" autocomplete="off"
-                 style="flex:1; font-family:var(--font-body); font-size:14px; padding:10px 14px; border-radius:8px; border:1px solid var(--paper-rule); background:var(--paper-raised); color:var(--ink-text);" />
-          <button class="primary-btn" id="generateTranscriptBtn">Generate video script</button>
-        </div>
+        <h1>Generate a video script &amp; story</h1>
+        <p>It picks its own topic from your Knowledge Base and generates a scene-by-scene video script and a realistic first-person incident story together — both teaching the same lesson. Click Script or Story to switch views.</p>
+        <form class="vs-composer" id="vsComposerForm">
+          <input type="text" name="objectives" id="vsObjectivesInput" placeholder="Learning objectives (optional)" autocomplete="off" />
+          <input type="text" name="label" id="vsNameInput" placeholder="Name this pair (optional)" autocomplete="off" />
+          <button type="submit" class="primary-btn" id="generateVsBtn">Generate</button>
+        </form>
       </header>
 
-      <div class="transcript-main">
-        <div class="transcript-empty" id="transcriptEmpty">
-          <p>No video script generated yet this session.</p>
+      <div class="vs-main">
+        <div class="vs-empty" id="vsEmpty">
+          <p>No video script / story generated yet this session.</p>
         </div>
 
-        <article class="transcript-card" id="transcriptCard" hidden>
-          <div class="transcript-card-head">
-            <span class="transcript-card-tag" id="transcriptCardTag">Video Script</span>
-            <a href="#" class="ghost-btn" id="transcriptDownload">Download .txt</a>
+        <div class="vs-panels" id="vsPanels" hidden>
+          <div class="vs-toggle">
+            <button type="button" class="vs-toggle-btn is-active" id="vsToggleScript">Script</button>
+            <button type="button" class="vs-toggle-btn" id="vsToggleStory">Story</button>
           </div>
-          <pre class="transcript-card-text" id="transcriptText"></pre>
-        </article>
+
+          <article class="vs-card" id="vsVideoCard">
+            <div class="vs-card-head">
+              <span class="vs-card-tag">Video Script</span>
+              <a href="#" class="ghost-btn" id="vsVideoDownload">Download .txt</a>
+            </div>
+            <pre class="vs-card-text" id="vsVideoText"></pre>
+          </article>
+          <article class="vs-card" id="vsStoryCard" hidden>
+            <div class="vs-card-head">
+              <span class="vs-card-tag">Story</span>
+              <a href="#" class="ghost-btn" id="vsStoryDownload">Download .txt</a>
+            </div>
+            <pre class="vs-card-text" id="vsStoryText"></pre>
+          </article>
+        </div>
       </div>
 
-      <aside class="transcript-rail">
-        <div class="transcript-rail-title">Generated video scripts</div>
-        <div class="transcript-rail-list" id="transcriptList">
-          <div class="transcript-rail-empty">Nothing generated yet.</div>
+      <aside class="vs-rail">
+        <div class="vs-rail-title">Generated pairs</div>
+        <div class="vs-rail-list" id="vsList">
+          <div class="vs-rail-empty">Nothing generated yet.</div>
         </div>
       </aside>
     </section>
@@ -948,6 +1281,45 @@ button { font-family: inherit; cursor: pointer; }
         <div class="image-rail-title">Generated images</div>
         <div class="image-rail-list" id="imageList">
           <div class="image-rail-empty">Nothing generated yet.</div>
+        </div>
+      </aside>
+    </section>
+
+    <!-- ---------- LEARNING FEED (CONTENT GENERATION) PANEL ---------- -->
+    <section class="panel" id="panel-content">
+      <header class="panel-head">
+        <h1>Generate a learning feed item</h1>
+        <p>Pick a content type and a topic. The topic is looked up in your Knowledge Base, rewritten into short original content, and paired with a freshly generated AI image — every item gets a picture.</p>
+      </header>
+
+      <div class="content-main">
+        <form class="content-composer" id="contentComposerForm">
+          <select id="contentTypeSelect"></select>
+          <input type="text" id="contentTopicInput" placeholder="e.g. Manual Material Handling" autocomplete="off" />
+          <button type="submit" class="primary-btn" id="generateContentBtn">Generate</button>
+        </form>
+
+        <div class="content-empty" id="contentEmpty">
+          <p>No learning content generated yet this session.</p>
+        </div>
+
+        <article class="content-card" id="contentCard" hidden>
+          <div class="content-card-head">
+            <span class="content-card-tag" id="contentCardTag">Recall Card</span>
+            <span class="content-card-topic" id="contentCardTopic"></span>
+            <a href="#" class="ghost-btn" id="contentDownload">Download .png</a>
+          </div>
+          <img class="content-card-picture" id="contentPicture" alt="Generated learning content image" />
+          <p class="content-card-text" id="contentText"></p>
+          <div class="content-card-prompt-toggle" id="contentPromptToggle">Show image prompt ▾</div>
+          <p class="content-card-prompt" id="contentPromptText" hidden></p>
+        </article>
+      </div>
+
+      <aside class="content-rail">
+        <div class="content-rail-title">Generated learning content</div>
+        <div class="content-rail-list" id="contentList">
+          <div class="content-rail-empty">Nothing generated yet.</div>
         </div>
       </aside>
     </section>
@@ -1242,12 +1614,6 @@ button { font-family: inherit; cursor: pointer; }
     }
   });
 
-  // ---- Video Script ----
-  const transcriptList = document.getElementById("transcriptList");
-  const transcriptEmpty = document.getElementById("transcriptEmpty");
-  const transcriptCard = document.getElementById("transcriptCard");
-  let activeTranscriptId = null;
-
   function formatTime(iso) {
     try {
       return new Date(iso).toLocaleString([], {
@@ -1258,89 +1624,112 @@ button { font-family: inherit; cursor: pointer; }
     }
   }
 
-  function renderTranscript(entry) {
-    activeTranscriptId = entry.id;
-    transcriptEmpty.hidden = true;
-    transcriptCard.hidden = false;
-    document.getElementById("transcriptCardTag").textContent = entry.label;
-    document.getElementById("transcriptText").textContent = entry.script;
+  // ---- Video Script & Story (dual output) ----
+  const vsList = document.getElementById("vsList");
+  const vsEmpty = document.getElementById("vsEmpty");
+  const vsPanels = document.getElementById("vsPanels");
+  let activeVsId = null;
 
-    const dl = document.getElementById("transcriptDownload");
-    const blob = new Blob([entry.script], { type: "text/plain" });
-    dl.href = URL.createObjectURL(blob);
-    dl.download = `${entry.label.replace(/\s+/g, "_")}.txt`;
-    dl.onclick = null;
+  function renderVs(entry) {
+    activeVsId = entry.id;
+    vsEmpty.hidden = true;
+    vsPanels.hidden = false;
+    document.getElementById("vsVideoText").textContent = entry.video_script;
+    document.getElementById("vsStoryText").textContent = entry.story;
 
-    document.querySelectorAll(".transcript-rail-item").forEach((el) => {
+    const safeLabel = entry.label.replace(/\s+/g, "_");
+    const videoDl = document.getElementById("vsVideoDownload");
+    videoDl.href = `data:text/plain;charset=utf-8,${encodeURIComponent(entry.video_script)}`;
+    videoDl.download = `${safeLabel}_video_script.txt`;
+    const storyDl = document.getElementById("vsStoryDownload");
+    storyDl.href = `data:text/plain;charset=utf-8,${encodeURIComponent(entry.story)}`;
+    storyDl.download = `${safeLabel}_story.txt`;
+
+    document.querySelectorAll(".vs-rail-item").forEach((el) => {
       el.classList.toggle("is-active", el.dataset.id === entry.id);
     });
   }
 
-  async function selectTranscript(id) {
+  function showVsView(view) {
+    const videoCard = document.getElementById("vsVideoCard");
+    const storyCard = document.getElementById("vsStoryCard");
+    const scriptBtn = document.getElementById("vsToggleScript");
+    const storyBtn = document.getElementById("vsToggleStory");
+    const showScript = view === "script";
+    videoCard.hidden = !showScript;
+    storyCard.hidden = showScript;
+    scriptBtn.classList.toggle("is-active", showScript);
+    storyBtn.classList.toggle("is-active", !showScript);
+  }
+
+  document.getElementById("vsToggleScript").addEventListener("click", () => showVsView("script"));
+  document.getElementById("vsToggleStory").addEventListener("click", () => showVsView("story"));
+
+  async function selectVs(id) {
     try {
-      const entry = await api(`/api/transcripts/${encodeURIComponent(id)}`);
-      renderTranscript(entry);
+      const entry = await api(`/api/video-stories/${encodeURIComponent(id)}`);
+      renderVs(entry);
     } catch (exc) {
-      alert("Could not load video script: " + exc.message);
+      alert("Could not load that pair: " + exc.message);
     }
   }
 
-  function renderTranscriptList(items) {
+  function renderVsList(items) {
     if (!items.length) {
-      transcriptList.innerHTML = `<div class="transcript-rail-empty">Nothing generated yet.</div>`;
+      vsList.innerHTML = `<div class="vs-rail-empty">Nothing generated yet.</div>`;
       return;
     }
-    transcriptList.innerHTML = items
+    vsList.innerHTML = items
       .slice()
       .reverse()
       .map(
         (t) => `
-          <button class="transcript-rail-item${t.id === activeTranscriptId ? " is-active" : ""}" data-id="${t.id}">
-            <div class="transcript-rail-item-label">${escapeHtml(t.label)}</div>
-            <div class="transcript-rail-item-time">${escapeHtml(formatTime(t.created_at))}</div>
+          <button class="vs-rail-item${t.id === activeVsId ? " is-active" : ""}" data-id="${t.id}">
+            <div class="vs-rail-item-label">${escapeHtml(t.label)}</div>
+            <div class="vs-rail-item-time">${escapeHtml(formatTime(t.created_at))}</div>
           </button>`
       )
       .join("");
 
-    transcriptList.querySelectorAll(".transcript-rail-item").forEach((btn) => {
-      btn.addEventListener("click", () => selectTranscript(btn.dataset.id));
+    vsList.querySelectorAll(".vs-rail-item").forEach((btn) => {
+      btn.addEventListener("click", () => selectVs(btn.dataset.id));
     });
   }
 
-  async function refreshTranscriptList() {
+  async function refreshVsList() {
     try {
-      const data = await api("/api/transcripts");
-      renderTranscriptList(data.transcripts || []);
+      const data = await api("/api/video-stories");
+      renderVsList(data.video_stories || []);
     } catch (exc) {
-      transcriptList.innerHTML = `<div class="transcript-rail-empty">Could not load list.</div>`;
+      vsList.innerHTML = `<div class="vs-rail-empty">Could not load list.</div>`;
     }
   }
 
-  document.getElementById("generateTranscriptBtn").addEventListener("click", async (e) => {
+  document.getElementById("vsComposerForm").addEventListener("submit", async (e) => {
     e.preventDefault();
-    const btn = e.target;
-    const nameInput = document.getElementById("transcriptNameInput");
-    const name = nameInput.value.trim();
+    const learning_objectives = document.getElementById("vsObjectivesInput").value.trim();
+    const name = document.getElementById("vsNameInput").value.trim();
+
+    const btn = document.getElementById("generateVsBtn");
     btn.disabled = true;
     btn.textContent = "Generating…";
     try {
-      const entry = await api("/api/transcript", {
+      const entry = await api("/api/video-story", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: name || null }),
+        body: JSON.stringify({ learning_objectives, name: name || null }),
       });
-      await refreshTranscriptList();
-      renderTranscript(entry);
-      nameInput.value = "";
+      await refreshVsList();
+      renderVs(entry);
     } catch (exc) {
-      alert("Could not generate video script: " + exc.message);
+      alert("Could not generate the video script / story: " + exc.message);
     } finally {
       btn.disabled = false;
-      btn.textContent = "Generate video script";
+      btn.textContent = "Generate";
     }
   });
 
-  refreshTranscriptList();
+  refreshVsList();
 
   // ---- Image generation (session-only history; not persisted server-side) ----
   const generatedImages = []; // {id, label, imageBase64, imagePrompt, createdAt}
@@ -1424,6 +1813,137 @@ button { font-family: inherit; cursor: pointer; }
   });
 
   renderImageList();
+
+  // ---- Learning Feed / content generation (session-only history) ----
+  const generatedContent = []; // {id, contentType, topic, contentText, imagePrompt, imageBase64, createdAt}
+  let activeContentId = null;
+
+  const contentTypeSelect = document.getElementById("contentTypeSelect");
+  const contentList = document.getElementById("contentList");
+  const contentEmpty = document.getElementById("contentEmpty");
+  const contentCard = document.getElementById("contentCard");
+
+  async function refreshContentTypes() {
+    try {
+      const data = await api("/api/content-types");
+      contentTypeSelect.innerHTML = (data.content_types || [])
+        .map((t) => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`)
+        .join("");
+    } catch (exc) {
+      // Fallback list, kept in sync with prompts/content_generation_system.txt,
+      // in case the endpoint can't be reached.
+      const fallback = [
+        "Recall Card", "AI Image", "Infographic", "Flashcard", "Scenario",
+        "Spot the Mistake Challenge", "Daily Quiz", "Fun Fact",
+        "Reflection Question", "Safety / Best Practice Tip",
+      ];
+      contentTypeSelect.innerHTML = fallback
+        .map((t) => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`)
+        .join("");
+    }
+  }
+
+  function renderContent(entry) {
+    activeContentId = entry.id;
+    contentEmpty.hidden = true;
+    contentCard.hidden = false;
+    document.getElementById("contentCardTag").textContent = entry.contentType;
+    document.getElementById("contentCardTopic").textContent = entry.topic;
+    document.getElementById("contentText").textContent = entry.contentText;
+
+    const promptEl = document.getElementById("contentPromptText");
+    const toggle = document.getElementById("contentPromptToggle");
+    promptEl.textContent = entry.imagePrompt;
+    promptEl.hidden = true;
+    toggle.textContent = "Show image prompt ▾";
+
+    const pic = document.getElementById("contentPicture");
+    pic.src = `data:image/png;base64,${entry.imageBase64}`;
+
+    const dl = document.getElementById("contentDownload");
+    dl.href = pic.src;
+    dl.download = `${entry.contentType.replace(/\s+/g, "_")}_${entry.topic.replace(/\s+/g, "_").slice(0, 30)}.png`;
+
+    document.querySelectorAll(".content-rail-item").forEach((el) => {
+      el.classList.toggle("is-active", el.dataset.id === entry.id);
+    });
+  }
+
+  function renderContentList() {
+    if (!generatedContent.length) {
+      contentList.innerHTML = `<div class="content-rail-empty">Nothing generated yet.</div>`;
+      return;
+    }
+    contentList.innerHTML = generatedContent
+      .slice()
+      .reverse()
+      .map(
+        (item) => `
+          <button class="content-rail-item${item.id === activeContentId ? " is-active" : ""}" data-id="${item.id}">
+            <img class="content-rail-item-thumb" src="data:image/png;base64,${item.imageBase64}" alt="" />
+            <div class="content-rail-item-label">
+              <span class="content-rail-item-type">${escapeHtml(item.contentType)}</span>
+              <span class="content-rail-item-topic">${escapeHtml(item.topic)}</span>
+            </div>
+          </button>`
+      )
+      .join("");
+
+    contentList.querySelectorAll(".content-rail-item").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const entry = generatedContent.find((item) => item.id === btn.dataset.id);
+        if (entry) renderContent(entry);
+      });
+    });
+  }
+
+  document.getElementById("contentPromptToggle").addEventListener("click", () => {
+    const promptEl = document.getElementById("contentPromptText");
+    const toggle = document.getElementById("contentPromptToggle");
+    const showing = !promptEl.hidden;
+    promptEl.hidden = showing;
+    toggle.textContent = showing ? "Show image prompt ▾" : "Hide image prompt ▴";
+  });
+
+  document.getElementById("contentComposerForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const contentType = contentTypeSelect.value;
+    const topicInput = document.getElementById("contentTopicInput");
+    const topic = topicInput.value.trim();
+    if (!contentType || !topic) return;
+
+    const btn = document.getElementById("generateContentBtn");
+    btn.disabled = true;
+    btn.textContent = "Generating…";
+    try {
+      const result = await api("/api/generate-content", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content_type: contentType, topic }),
+      });
+      const entry = {
+        id: `${Date.now()}`,
+        contentType: result.content_type,
+        topic: result.topic,
+        contentText: result.content_text,
+        imagePrompt: result.image_prompt,
+        imageBase64: result.image_base64,
+        createdAt: new Date().toISOString(),
+      };
+      generatedContent.push(entry);
+      renderContentList();
+      renderContent(entry);
+      topicInput.value = "";
+    } catch (exc) {
+      alert("Could not generate content: " + exc.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Generate";
+    }
+  });
+
+  renderContentList();
+  refreshContentTypes();
 
   // ---- Init ----
   refreshStatus();

@@ -38,3 +38,27 @@ Then the script body itself, written as a video narration script with:
 Do not add any closing meta-commentary about the script itself (no summary paragraph explaining what the script does or how it aligns with the source material). End on the final scene direction or the discussion question — nothing after it.
 
 Training Script:
+
+====================================================
+DUAL-OUTPUT MODE — used only when the caller asks for a Video Script + Story pair together (see generate_video_and_story() in services/llm_service.py). Ignore this section entirely for a normal single-script call.
+====================================================
+
+When generating a dual Video Script + Story pair, the request will additionally supply:
+Topic: {topic}
+Learning Objectives: {learning_objectives}
+
+In dual mode, ignore the "REQUIRED SCRIPT FORMAT" above (the ".mp4"/TRT/Narrative Script header) and instead produce exactly two panels, in this order, using the Topic + Learning Objectives + TRAINING CONTENT above:
+
+LEFT PANEL
+A professional training video script as a scene-by-scene table. For every scene include: Scene Number, Visual Description, Camera Direction, Narration, On-screen Action, Transition. Suitable for an educational safety training video; narration engaging and easy to understand.
+
+RIGHT PANEL
+A realistic first-person story — a real worker sharing what happened after an incident, following this flow woven into natural prose (never as labeled sections): introduce yourself and your profession; describe the activity; explain why this day was different; build tension; describe the small decisions that led to the incident; describe the incident; explain the consequence; reflect; explain how it could have been much worse; end with what you learned.
+
+Never write the literal words "State:" or "Error:" or name a State/Error outright. Show them only through actions and thoughts:
+States — Rushing (e.g. "I kept checking the clock so I wouldn't miss my daughter's birthday dinner"), Frustration (e.g. "I'd already searched everywhere and nothing was going my way"), Fatigue (e.g. "It had been a long shift and I could feel myself losing focus"), Complacency (e.g. "I'd done this job hundreds of times, so I skipped my usual checks").
+Errors — Eyes not on task (e.g. "I glanced away for just a second"), Mind not on task (e.g. "My thoughts were already on getting home"), Line of fire (e.g. "My hand was right where the load shifted"), Balance/traction/grip (e.g. "I stretched farther than I should have"). These are style examples only — invent fresh phrasing every run, never reuse verbatim.
+
+Never reuse a character name from a previous run — invent a fresh one each time. Choose a workplace matching the Topic (Warehouse, Construction, Manufacturing, Factory, Mining, Hospital, Power Plant, Oil & Gas, Road Construction, Airport, Laboratory, Logistics, Office, Delivery Services, Utility Maintenance; for road-safety topics use Motorcyclist, Delivery Driver, Taxi Driver, Bus Driver, Pedestrian, or Cyclist instead). First person, conversational, professional, realistic, simple English. Every story must be unique — never copy a previous story, the TRAINING CONTENT, or any other source. End with a short reflection reinforcing the Learning Objectives.
+
+Output exactly the two panel headers "LEFT PANEL" and "RIGHT PANEL" on their own lines, in that order, with nothing else on those lines. No reasoning, no mention of prompts, states, or critical errors by name anywhere in the output, no closing meta-commentary after the story.

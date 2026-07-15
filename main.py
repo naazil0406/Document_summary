@@ -23,7 +23,7 @@ import re
 import uuid
 from datetime import datetime
 from functools import lru_cache
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -42,6 +42,7 @@ from services.qdrant_db import QdrantService
 from services.retriever import Retriever, SUMMARY_KEYWORDS
 from services.llm_service import (
     FALLBACK_ANSWER,
+    CONTENT_TYPES,
     OpenRouterLLMService,
     BedrockLLMService,
 )
@@ -140,6 +141,32 @@ def get_summary_llm() -> OpenRouterLLMService:
         model=settings.OPENROUTER_MODEL,
         max_tokens=settings.SUMMARY_MAX_TOKENS,
         temperature=settings.OPENROUTER_TEMPERATURE,
+        site_url=settings.OPENROUTER_SITE_URL,
+        site_name=settings.OPENROUTER_SITE_NAME,
+    )
+
+
+@lru_cache(maxsize=1)
+def get_content_llm() -> OpenRouterLLMService:
+    """Content Generation Agent — same provider switch as get_qa_llm()/
+    get_summary_llm(), tuned with its own token cap + higher temperature
+    (settings.CONTENT_MAX_TOKENS / CONTENT_TEMPERATURE) since this pipeline
+    generates short (50-100 word), deliberately varied learning-feed text.
+    """
+    if settings.LLM_PROVIDER == "bedrock":
+        return BedrockLLMService(
+            model=settings.BEDROCK_MODEL,
+            max_tokens=settings.CONTENT_MAX_TOKENS,
+            temperature=settings.CONTENT_TEMPERATURE,
+            region_name=settings.BEDROCK_REGION,
+            aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+        )
+    return OpenRouterLLMService(
+        api_key=settings.OPENROUTER_API_KEY,
+        model=settings.OPENROUTER_MODEL,
+        max_tokens=settings.CONTENT_MAX_TOKENS,
+        temperature=settings.CONTENT_TEMPERATURE,
         site_url=settings.OPENROUTER_SITE_URL,
         site_name=settings.OPENROUTER_SITE_NAME,
     )
@@ -557,6 +584,65 @@ def _list_saved_scripts() -> List[dict]:
     return entries
 
 
+def save_dual_script(video_script: str, story: str, label: str) -> Tuple[str, str]:
+    """Save a Video Script + Story pair as two sibling .txt files under
+    settings.DUAL_SCRIPTS_DIR, sharing one safe_label stem so they're easy
+    to browse/pair up on disk. Returns (video_path, story_path)."""
+    os.makedirs(settings.DUAL_SCRIPTS_DIR, exist_ok=True)
+    safe_label = re.sub(r"[^A-Za-z0-9_-]+", "_", label).strip("_") or "video_story"
+
+    video_filename = f"{safe_label}_video.txt"
+    video_path = os.path.join(settings.DUAL_SCRIPTS_DIR, video_filename)
+    counter = 2
+    while os.path.exists(video_path):
+        video_filename = f"{safe_label}_video_{counter}.txt"
+        video_path = os.path.join(settings.DUAL_SCRIPTS_DIR, video_filename)
+        counter += 1
+
+    # Reuse whatever suffix counter the video file needed so the pair stays
+    # aligned (e.g. "topic_video_2.txt" pairs with "topic_story_2.txt").
+    story_filename = video_filename.replace("_video", "_story", 1) if "_video_" in video_filename or video_filename.endswith("_video.txt") else f"{safe_label}_story.txt"
+    story_path = os.path.join(settings.DUAL_SCRIPTS_DIR, story_filename)
+
+    with open(video_path, "w", encoding="utf-8") as f:
+        f.write(video_script)
+    with open(story_path, "w", encoding="utf-8") as f:
+        f.write(story)
+    logger.info("Saved video script + story pair to '%s' / '%s'.", video_path, story_path)
+    return video_path, story_path
+
+
+def _list_saved_dual_scripts() -> List[dict]:
+    """Every Video Script + Story pair on disk, oldest first — the source
+    of truth for the Video Script & Story rail."""
+    folder = settings.DUAL_SCRIPTS_DIR
+    if not os.path.isdir(folder):
+        return []
+
+    entries = []
+    for filename in os.listdir(folder):
+        if not filename.endswith("_video.txt"):
+            continue
+        video_path = os.path.join(folder, filename)
+        story_path = os.path.join(folder, filename.replace("_video.txt", "_story.txt"))
+        if not (os.path.isfile(video_path) and os.path.isfile(story_path)):
+            continue
+        label = filename[: -len("_video.txt")].replace("_", " ")
+        created_at = datetime.fromtimestamp(os.path.getmtime(video_path)).isoformat()
+        entries.append(
+            {
+                "id": filename,
+                "label": label,
+                "video_path": video_path,
+                "story_path": story_path,
+                "created_at": created_at,
+            }
+        )
+
+    entries.sort(key=lambda e: e["created_at"])
+    return entries
+
+
 def save_generated_image(image_bytes: bytes, label: str) -> str:
     os.makedirs(settings.GENERATED_IMAGES_DIR, exist_ok=True)
     safe_label = re.sub(r"[^A-Za-z0-9_-]+", "_", label).strip("_") or "image"
@@ -627,6 +713,80 @@ def generate_document_image(
     saved_path = save_generated_image(image_bytes, label=query[:40])
 
     return {
+        "image_prompt": image_prompt,
+        "image_base64": base64.b64encode(image_bytes).decode("utf-8"),
+        "saved_path": saved_path,
+    }
+
+
+def generate_learning_feed_item(
+    content_type: str,
+    topic: str,
+    retriever,
+    content_llm,
+    image_prompt_llm,
+    image_gen_service,
+) -> dict:
+    """End-to-end Learning Content Generation Engine pipeline for one feed
+    item:
+
+      1. Knowledge Extraction — retrieve the Topic from the Knowledge Base
+         (Qdrant, via retriever.retrieve()).
+      2. Content Generation Agent — turn (Content Type + Topic + retrieved
+         chunks) into one short, original piece of learner-facing text
+         (services/llm_service.py generate_learning_content()).
+      3. Image Prompt Generation Agent — turn (the generated text + Topic)
+         into one optimized image-generation prompt (Nova Lite, the same
+         generate_image_prompt() the standalone image pipeline uses).
+      4. Image Generation Agent — render that prompt into an image via
+         whichever backend settings.IMAGE_PROVIDER selects.
+
+    Every content type gets an image: the image prompt is always derived
+    from the LLM-generated content_text (never the raw topic string alone),
+    so the picture actually reflects what the card/scenario/quiz says.
+    """
+    topic = topic.strip()
+    if not topic:
+        raise ValueError("topic must not be empty.")
+    if content_type not in CONTENT_TYPES:
+        raise ValueError(
+            f"Unsupported content type '{content_type}'. "
+            f"Supported types: {', '.join(CONTENT_TYPES)}"
+        )
+
+    try:
+        chunks = retriever.retrieve(topic)
+    except Exception as exc:
+        logger.error("Retrieval failed during content generation: %s", exc)
+        raise RuntimeError("An error occurred while retrieving relevant information.") from exc
+
+    if not chunks:
+        raise ValueError(
+            f"No relevant context was found in the indexed documents for topic: {topic}. "
+            "Upload and process the relevant document first."
+        )
+
+    content_text = content_llm.generate_learning_content(content_type, topic, chunks)
+
+    # The Image Prompt Generation Agent (Nova Lite) is driven by what the
+    # content actually says, not just the bare topic, so the image matches
+    # the specific fact/scenario/question generated above.
+    image_query = f"{content_type} about \"{topic}\": {content_text}"
+    image_prompt = image_prompt_llm.generate_image_prompt(image_query, chunks)
+
+    negative_prompt = (
+        "photorealistic, realistic photo, photograph, cinematic lighting, "
+        "realistic human faces, realistic skin texture, depth of field, "
+        "camera bokeh, film grain, 3D render of real people, blurry, low detail, "
+        "text, captions, logos, watermarks"
+    )
+    image_bytes = image_gen_service.generate_image(image_prompt, negative_prompt=negative_prompt)
+    saved_path = save_generated_image(image_bytes, label=f"{content_type}_{topic[:30]}")
+
+    return {
+        "content_type": content_type,
+        "topic": topic,
+        "content_text": content_text,
         "image_prompt": image_prompt,
         "image_base64": base64.b64encode(image_bytes).decode("utf-8"),
         "saved_path": saved_path,
@@ -769,11 +929,44 @@ class TranscriptSummary(BaseModel):
     created_at: str
 
 
+class VideoStoryRequest(BaseModel):
+    learning_objectives: Optional[str] = ""
+    name: Optional[str] = None
+
+
+class VideoStoryResponse(BaseModel):
+    id: str
+    label: str
+    video_script: str
+    story: str
+    created_at: str
+
+
+class VideoStorySummary(BaseModel):
+    id: str
+    label: str
+    created_at: str
+
+
 class ImageGenRequest(BaseModel):
     query: str
 
 
 class ImageGenResponse(BaseModel):
+    image_prompt: str
+    image_base64: str
+    saved_path: str
+
+
+class ContentGenRequest(BaseModel):
+    content_type: str
+    topic: str
+
+
+class ContentGenResponse(BaseModel):
+    content_type: str
+    topic: str
+    content_text: str
     image_prompt: str
     image_base64: str
     saved_path: str
@@ -981,6 +1174,27 @@ def sync_from_s3():
     }
 
 
+_FIRST_PERSON_NAME_PATTERN = re.compile(
+    r"\bmy name(?:'s| is)\s+([A-Z][a-zA-Z]+)", re.IGNORECASE
+)
+
+
+def _extract_first_person_name(story_text: str) -> Optional[str]:
+    """Pull the invented character's first name out of a first-person
+    story's self-introduction (e.g. 'Hi, my name is Priya...'), per
+    prompts/video_story_dual_system.txt's required story structure. Used to
+    auto-name saved Video Script + Story pairs when the user doesn't type
+    one."""
+    match = _FIRST_PERSON_NAME_PATTERN.search(story_text)
+    if not match:
+        return None
+    name = match.group(1).strip()
+    return name or None
+
+
+
+
+
 _STORY_HEADER_PATTERN = re.compile(r"^Story\s*-\s*(.+?)\.mp4\s*$", re.IGNORECASE | re.MULTILINE)
 
 
@@ -1060,6 +1274,82 @@ def get_transcript(transcript_id: str):
                 created_at=t["created_at"],
             )
     raise HTTPException(404, "Video script not found.")
+
+
+@app.post("/api/video-story", response_model=VideoStoryResponse)
+def generate_video_story(req: VideoStoryRequest):
+    """Dual Video Script + Story generator (the 'DUAL-OUTPUT MODE' section
+    of prompts/presentation_prompt.txt): no topic needed — it draws on
+    everything indexed in the Knowledge Base and picks its own topic, then
+    produces a scene-by-scene Video Script and a first-person incident
+    Story together in one call, teaching the same lesson from two angles.
+    """
+    qdrant_service = get_qdrant_service()
+    presentation_llm = get_presentation_llm()
+
+    docs = existing_documents()
+    all_chunks = []
+    for pdf in docs:
+        chunks = _get_all_chunks(pdf, qdrant_service)
+        if chunks:
+            all_chunks.extend(chunks)
+
+    if not all_chunks:
+        raise HTTPException(
+            422, "No indexed content found. Please upload and process at least one document first."
+        )
+
+    try:
+        video_script, story = presentation_llm.generate_video_and_story(
+            req.learning_objectives or "", all_chunks
+        )
+    except Exception as exc:
+        raise HTTPException(500, f"Something went wrong while generating the video script and story: {exc}")
+
+    custom_name = (req.name or "").strip()
+    story_name = _extract_first_person_name(story)
+    label = custom_name or story_name or f"Video Story {len(_list_saved_dual_scripts()) + 1}"
+    video_path, story_path = save_dual_script(video_script, story, label)
+
+    entry = {
+        "id": os.path.basename(video_path),
+        "label": os.path.basename(video_path)[: -len("_video.txt")].replace("_", " "),
+        "video_script": video_script,
+        "story": story,
+        "created_at": datetime.fromtimestamp(os.path.getmtime(video_path)).isoformat(),
+    }
+    return VideoStoryResponse(**entry)
+
+
+@app.get("/api/video-stories")
+def list_video_stories():
+    return {
+        "video_stories": [
+            VideoStorySummary(id=t["id"], label=t["label"], created_at=t["created_at"])
+            for t in _list_saved_dual_scripts()
+        ]
+    }
+
+
+@app.get("/api/video-stories/{pair_id}", response_model=VideoStoryResponse)
+def get_video_story(pair_id: str):
+    for t in _list_saved_dual_scripts():
+        if t["id"] == pair_id:
+            try:
+                with open(t["video_path"], "r", encoding="utf-8") as f:
+                    video_script = f.read()
+                with open(t["story_path"], "r", encoding="utf-8") as f:
+                    story = f.read()
+            except OSError as exc:
+                raise HTTPException(500, f"Could not read saved video script / story: {exc}")
+            return VideoStoryResponse(
+                id=t["id"],
+                label=t["label"],
+                video_script=video_script,
+                story=story,
+                created_at=t["created_at"],
+            )
+    raise HTTPException(404, "Video script / story pair not found.")
 
 
 @app.post("/api/chat", response_model=ChatResponse)
@@ -1166,6 +1456,48 @@ def generate_image(req: ImageGenRequest):
         raise HTTPException(500, "An error occurred while generating the image.")
 
     return ImageGenResponse(**result)
+
+
+@app.get("/api/content-types")
+def content_types():
+    """List of Content Types the Learning Content Generation Engine
+    supports, for the UI's dropdown."""
+    return {"content_types": CONTENT_TYPES}
+
+
+@app.post("/api/generate-content", response_model=ContentGenResponse)
+def generate_content(req: ContentGenRequest):
+    """Learning Content Generation Engine: Content Type + Topic in,
+    original learner-facing text + a matching AI image out. See
+    generate_learning_feed_item() for the full pipeline (Knowledge
+    Extraction -> Content Generation Agent -> Image Prompt Generation
+    Agent -> Image Generation Agent).
+    """
+    content_type = req.content_type.strip()
+    topic = req.topic.strip()
+    if not content_type:
+        raise HTTPException(400, "content_type must not be empty.")
+    if not topic:
+        raise HTTPException(400, "topic must not be empty.")
+
+    retriever = get_retriever()
+    content_llm = get_content_llm()
+    image_prompt_llm = get_image_prompt_llm()
+    image_gen_service = get_image_gen_service()
+
+    try:
+        result = generate_learning_feed_item(
+            content_type, topic, retriever, content_llm, image_prompt_llm, image_gen_service
+        )
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc))
+    except Exception as exc:
+        logger.error("Content generation failed: %s", exc)
+        raise HTTPException(500, "An error occurred while generating the content.")
+
+    return ContentGenResponse(**result)
 
 
 # ---------------------------------------------------------------------------

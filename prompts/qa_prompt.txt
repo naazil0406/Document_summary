@@ -12,6 +12,7 @@ Instructions:
 * Do not invent, infer, or add information that is not present in the context.
 * Do not use section headings, bullets, numbered lists, labels, or extra titles.
 * Preserve important facts, dates, names, numbers, and findings exactly as they appear in the context.
+* Be specific and grounded in this content — never give generic, template-like answers or suggest generic follow-up questions (such as "What is this document about?" or "What are the key takeaways?") that could apply to any document; always reference the actual named people, sections, procedures, statistics, policies, terms, or events found in the context.
 
 
 Answer:

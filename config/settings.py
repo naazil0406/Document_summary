@@ -104,6 +104,13 @@ class Settings:
     # in addition to being shown/downloadable in the Streamlit UI.
     NARRATIVE_SCRIPTS_DIR: str = os.getenv("NARRATIVE_SCRIPTS_DIR", "Narrative_scripts")
 
+    # Dual Video Script + Story generator (see prompts/video_story_dual_system.txt).
+    # Kept in its own directory rather than NARRATIVE_SCRIPTS_DIR so the
+    # legacy single-panel "Story - X.mp4"-style scripts and these new
+    # {video, story} pairs never collide on the "_script.txt" filename
+    # convention _list_saved_scripts() relies on.
+    DUAL_SCRIPTS_DIR: str = os.getenv("DUAL_SCRIPTS_DIR", "Narrative_scripts/dual")
+
     # --- Image generation pipeline (Nova Lite prompt -> image renderer) ---
     # Model 1: Nova Lite turns the user's request + retrieved RAG chunks
     # into one optimized image-generation prompt (see
@@ -113,6 +120,16 @@ class Settings:
     BEDROCK_IMAGE_PROMPT_MODEL: str = os.getenv("BEDROCK_IMAGE_PROMPT_MODEL", "amazon.nova-lite-v1:0")
     IMAGE_PROMPT_MAX_TOKENS: int = int(os.getenv("IMAGE_PROMPT_MAX_TOKENS", "512"))
     IMAGE_PROMPT_TEMPERATURE: float = float(os.getenv("IMAGE_PROMPT_TEMPERATURE", "0.3"))
+
+    # --- Learning Content Generation Engine ---
+    # Turns (Content Type + Topic) into one short original piece of learning
+    # content (Recall Card, Flashcard, Scenario, Daily Quiz, etc. — see
+    # prompts/content_generation_system.txt), using the same LLM_PROVIDER
+    # switch as get_qa_llm()/get_summary_llm(), just with its own token cap
+    # and a higher temperature so repeated generations on the same topic
+    # don't converge on identical wording.
+    CONTENT_MAX_TOKENS: int = int(os.getenv("CONTENT_MAX_TOKENS", "400"))
+    CONTENT_TEMPERATURE: float = float(os.getenv("CONTENT_TEMPERATURE", "0.7"))
 
     # Renderer 2: turns that prompt into the actual image. Three
     # interchangeable providers, all exposed as `.generate_image(prompt)` in
