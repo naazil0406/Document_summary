@@ -31,7 +31,10 @@ from services.canonical_naming import canonical_filename, is_canonical
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_EXTENSIONS = (".pdf", ".docx", ".xlsx", ".xlsm", ".xls", ".csv")
+SUPPORTED_EXTENSIONS = (
+    ".pdf", ".docx", ".xlsx", ".xlsm", ".xls", ".csv", ".pptx",
+    ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff",
+)
 
 
 def migrate(dry_run: bool = False) -> list[tuple[str, str]]:

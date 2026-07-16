@@ -594,11 +594,9 @@ class BaseLLMService:
             learning_objectives=learning_objectives.strip() if learning_objectives and learning_objectives.strip()
             else "Not explicitly given — infer sensible objectives from the Knowledge Base Content.",
             retrieved_chunks=format_context(chunks),
-            # The template also contains {seed_character_name}/{seed_workplace}
-            # from single-script mode (str.format requires every placeholder
-            # in the string to be supplied); dual-mode's own instructions
-            # tell the model to invent a fresh name/workplace anyway, so
-            # these seeds are unused filler here, not a real constraint.
+            # seed_character_name/seed_workplace are used directly by the
+            # DUAL-OUTPUT MODE instructions so the LEFT PANEL script and the
+            # RIGHT PANEL story share the same invented character/incident.
             seed_character_name=seed_character_name,
             seed_workplace=seed_workplace,
         )

@@ -1,9 +1,8 @@
-"""Canonical document naming: ``"Unit N - 123456.ext"`` (or ``"Misc -
-123456.ext"`` when no unit number is found in the original filename).
+"""Canonical document naming: ``"<original stem> - 123456.ext"``.
 
 Every document gets a stable, unambiguous name at ingestion time so that
-casual references like "Unit 1" never collide the way raw uploaded
-filenames can (e.g. "...Unit 1_09122023.pdf" vs "...Unit 1 Part 1.xlsx").
+casual references never collide the way raw uploaded filenames can (e.g.
+two different uploads both named "report.pdf").
 
 The unique 6-digit id is a deterministic hash of the *original* filename,
 not a random or sequential counter -- so re-running ingestion, or migrating
@@ -16,24 +15,23 @@ import os
 import re
 from typing import NamedTuple, Optional
 
-_UNIT_PATTERN = re.compile(r"(?<![a-zA-Z])unit[\s_]*0*(\d+)(?!\d)", re.IGNORECASE)
-
-# Matches the canonical stem itself, e.g. "Unit 20 - 100235" or "Misc - 483920".
-_CANONICAL_PATTERN = re.compile(r"^(?:Unit (\d+)|Misc) - (\d{6})$", re.IGNORECASE)
+# Matches the canonical stem itself, e.g. "Quarterly Report - 100235".
+_CANONICAL_PATTERN = re.compile(r"^(.+) - (\d{6})$")
 
 _ID_MIN = 100000
 _ID_RANGE = 900000  # 100000..999999 inclusive
 
 
 class CanonicalInfo(NamedTuple):
-    unit: Optional[str]  # unit number as a string, or None for "Misc"
+    original_name: str  # original filename stem, sanitized
     unique_id: str  # 6-digit string
 
 
-def extract_unit_number(name: str) -> Optional[str]:
-    """Pull a unit number out of a raw (non-canonical) filename or reference."""
-    match = _UNIT_PATTERN.search(name)
-    return match.group(1) if match else None
+def _sanitize_stem(stem: str) -> str:
+    """Strip characters that are unsafe in filenames (path separators,
+    etc.) while keeping the name human-readable."""
+    stem = re.sub(r'[\\/:*?"<>|]', "", stem).strip()
+    return stem or "Document"
 
 
 def unique_id_for(original_name: str) -> str:
@@ -48,20 +46,20 @@ def unique_id_for(original_name: str) -> str:
 
 
 def is_canonical(name: str) -> bool:
-    """True if `name` is already in canonical "Unit N - 123456" / "Misc -
-    123456" form (extension ignored)."""
+    """True if `name` is already in canonical "<name> - 123456" form
+    (extension ignored)."""
     stem = os.path.splitext(name)[0]
     return bool(_CANONICAL_PATTERN.match(stem.strip()))
 
 
 def parse_canonical(name: str) -> Optional[CanonicalInfo]:
-    """Return (unit, unique_id) if `name` is canonical, else None."""
+    """Return (original_name, unique_id) if `name` is canonical, else None."""
     stem = os.path.splitext(name)[0]
     match = _CANONICAL_PATTERN.match(stem.strip())
     if not match:
         return None
-    unit, uid = match.group(1), match.group(2)
-    return CanonicalInfo(unit=unit, unique_id=uid)
+    original_name, uid = match.group(1), match.group(2)
+    return CanonicalInfo(original_name=original_name, unique_id=uid)
 
 
 def canonical_filename(original_name: str) -> str:
@@ -74,7 +72,6 @@ def canonical_filename(original_name: str) -> str:
         return original_name
 
     stem, ext = os.path.splitext(original_name)
-    unit = extract_unit_number(stem)
     uid = unique_id_for(original_name)
-    label = f"Unit {unit}" if unit else "Misc"
+    label = _sanitize_stem(stem)
     return f"{label} - {uid}{ext}"

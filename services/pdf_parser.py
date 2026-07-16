@@ -116,28 +116,26 @@ def _ocr_page_local_tesseract(page: fitz.Page) -> str:
     raise RuntimeError("Local Tesseract OCR is disabled; Docker OCR is mandatory")
 
 
-def _ocr_page_docker(page: fitz.Page) -> str:
-    """Rasterise a page and run OCR inside a Docker Tesseract container."""
-    try:
-        from PIL import Image
-    except ImportError:
-        raise RuntimeError(
-            "Python package 'Pillow' is not installed. "
-            "Run: pip install Pillow"
-        )
+def ocr_png_docker(png_path: str, *, label: str = "image") -> str:
+    """Run Docker Tesseract OCR on an existing PNG file and return the text.
 
+    Shared by the PDF per-page OCR fallback below and by
+    ``services/image_parser.py`` (standalone uploaded images), so both
+    paths go through the exact same Docker/Tesseract invocation instead of
+    duplicating the container-run logic.
+    """
     try:
         client, docker = _get_docker_client()
     except RuntimeError as exc:
         logger.error("Docker OCR failed: %s", exc)
         raise
 
+    src_dir = os.path.dirname(os.path.abspath(png_path))
+    src_name = os.path.basename(png_path)
+
     with tempfile.TemporaryDirectory() as tmpdir:
-        try:
-            png_path = _render_page_png(page, tmpdir)
-        except Exception as exc:
-            logger.error("Could not render page %d for Docker OCR: %s", page.number + 1, exc)
-            raise
+        work_png = os.path.join(tmpdir, "page.png")
+        shutil.copy(os.path.join(src_dir, src_name) if src_dir else src_name, work_png)
 
         out_base = os.path.join(tmpdir, "output")   # Tesseract appends .txt
 
@@ -174,25 +172,42 @@ def _ocr_page_docker(page: fitz.Page) -> str:
 
         except docker.errors.ContainerError as exc:
             logger.error(
-                "Tesseract container exited with non-zero status for page %d: %s",
-                page.number + 1, exc,
+                "Tesseract container exited with non-zero status for %s: %s",
+                label, exc,
             )
             raise
 
         except Exception as exc:
-            logger.error("Docker OCR failed for page %d: %s", page.number + 1, exc)
+            logger.error("Docker OCR failed for %s: %s", label, exc)
             raise
 
         output_txt = out_base + ".txt"
         if not os.path.isfile(output_txt):
-            logger.error(
-                "Tesseract produced no output file for page %d.",
-                page.number + 1,
-            )
+            logger.error("Tesseract produced no output file for %s.", label)
             raise RuntimeError("Docker OCR did not produce output")
 
         with open(output_txt, "r", encoding="utf-8", errors="replace") as fh:
             return fh.read()
+
+
+def _ocr_page_docker(page: fitz.Page) -> str:
+    """Rasterise a PDF page and run OCR inside a Docker Tesseract container."""
+    try:
+        from PIL import Image  # noqa: F401  (import check retained for parity)
+    except ImportError:
+        raise RuntimeError(
+            "Python package 'Pillow' is not installed. "
+            "Run: pip install Pillow"
+        )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        try:
+            png_path = _render_page_png(page, tmpdir)
+        except Exception as exc:
+            logger.error("Could not render page %d for Docker OCR: %s", page.number + 1, exc)
+            raise
+
+        return ocr_png_docker(png_path, label=f"page {page.number + 1}")
     
 
 

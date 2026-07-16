@@ -7,6 +7,8 @@ xlrd==2.0.2
 pymupdf==1.24.10
 # --- Word document parsing (content ingestion + narrative script templates) ---
 python-docx==1.1.2
+# --- PowerPoint slide-deck parsing (content ingestion, one PageContent per slide) ---
+python-pptx==1.0.2
 # --- OCR dependencies (Docker-based — no host Tesseract binary needed) ---
 # 'docker' is the Python SDK for talking to the local Docker daemon.
 # 'Pillow' is used to convert PyMuPDF pixmaps to PNG before sending to Docker.
@@ -45,5 +47,7 @@ uvicorn[standard]>=0.30.0
 python-multipart>=0.0.9
 
 # --- Hugging Face Inference (FLUX.1-dev image generation) ---
-huggingface_hub==1.22.0
- 
+# NOTE: must stay <1.0 -- transformers (pulled in via sentence-transformers)
+# requires huggingface-hub<1.0, so pinning >=1.0 here makes pip's resolver
+# fail with "ResolutionImpossible".
+huggingface_hub>=0.26.0,<1.0

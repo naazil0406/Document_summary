@@ -22,6 +22,13 @@ a working cache of it.
 This module is optional: if S3_BUCKET_NAME isn't set in .env, app.py's
 get_s3_storage() returns None and the app runs exactly as it did before —
 local-folder-only, no AWS calls, no boto3 credentials required.
+
+Multiple prefixes: S3_PREFIX can be a single folder ("data/") or a
+comma-separated list of folders ("data/,July2026/") when documents are
+split across more than one top-level "folder" in the same bucket. Every
+read/write operation loops over all configured prefixes, so uploads land
+under the first prefix (the primary/default one) while listing and
+syncing pull from all of them.
 """
 
 import logging
@@ -34,8 +41,18 @@ from botocore.exceptions import ClientError, NoCredentialsError
 logger = logging.getLogger(__name__)
 
 
+def _normalize_prefix(prefix: str) -> str:
+    prefix = prefix.strip().strip("/")
+    return f"{prefix}/" if prefix else ""
+
+
 class S3Storage:
-    """Thin wrapper around an S3 bucket used as durable document storage."""
+    """Thin wrapper around an S3 bucket used as durable document storage.
+
+    ``prefix`` accepts either a single folder ("data/") or a
+    comma-separated list of folders ("data/,July2026/") to read from
+    multiple "folders" in the same bucket.
+    """
 
     def __init__(
         self,
@@ -49,10 +66,16 @@ class S3Storage:
             raise ValueError("S3_BUCKET_NAME is required to use S3Storage.")
 
         self.bucket_name = bucket_name
-        # Normalize so keys never end up with a double/missing slash.
-        self.prefix = prefix.strip("/")
-        if self.prefix:
-            self.prefix += "/"
+
+        # Normalize each comma-separated entry so keys never end up with a
+        # double/missing slash. self.prefixes[0] is the "primary" prefix
+        # new uploads are written under; every prefix is read from.
+        raw_prefixes = [p for p in prefix.split(",") if p.strip()] or [""]
+        self.prefixes: List[str] = [_normalize_prefix(p) for p in raw_prefixes]
+
+        # Backward-compatible single-prefix attribute (primary/default one)
+        # for any older code that still reads .prefix directly.
+        self.prefix = self.prefixes[0]
 
         # If explicit keys are provided in .env, use them. Otherwise fall
         # back to boto3's normal credential chain (env vars, ~/.aws/credentials,
@@ -65,11 +88,13 @@ class S3Storage:
 
         self.client = boto3.client("s3", **client_kwargs)
 
-    def _key_for(self, filename: str) -> str:
-        return f"{self.prefix}{filename}"
+    def _key_for(self, filename: str, prefix: Optional[str] = None) -> str:
+        prefix = self.prefix if prefix is None else prefix
+        return f"{prefix}{filename}"
 
     def upload_file(self, local_path: str, filename: str) -> str:
-        """Upload a local file to S3. Returns the s3:// URI it was stored at."""
+        """Upload a local file to S3 under the primary (first) prefix.
+        Returns the s3:// URI it was stored at."""
         key = self._key_for(filename)
         try:
             self.client.upload_file(local_path, self.bucket_name, key)
@@ -85,56 +110,78 @@ class S3Storage:
         logger.info("Uploaded '%s' to %s.", filename, uri)
         return uri
 
+    def _find_key(self, filename: str) -> Optional[str]:
+        """Return the first existing key for filename across all configured
+        prefixes, or None if it doesn't exist under any of them."""
+        for prefix in self.prefixes:
+            key = self._key_for(filename, prefix)
+            try:
+                self.client.head_object(Bucket=self.bucket_name, Key=key)
+                return key
+            except ClientError as exc:
+                error_code = exc.response.get("Error", {}).get("Code", "")
+                if error_code in ("404", "NoSuchKey"):
+                    continue
+                raise RuntimeError(f"Failed to check '{filename}' in S3: {exc}") from exc
+        return None
+
     def download_file(self, filename: str, local_path: str) -> bool:
-        """Download filename from S3 to local_path. Returns True if downloaded,
-        False if the object doesn't exist in the bucket."""
-        key = self._key_for(filename)
+        """Download filename from S3 (searched across all configured
+        prefixes) to local_path. Returns True if downloaded, False if the
+        object doesn't exist in any configured prefix."""
+        key = self._find_key(filename)
+        if key is None:
+            return False
         try:
             self.client.download_file(self.bucket_name, key, local_path)
         except ClientError as exc:
-            error_code = exc.response.get("Error", {}).get("Code", "")
-            if error_code in ("404", "NoSuchKey"):
-                return False
             raise RuntimeError(f"Failed to download '{filename}' from S3: {exc}") from exc
 
         logger.info("Downloaded '%s' from S3 to '%s'.", filename, local_path)
         return True
 
     def file_exists(self, filename: str) -> bool:
-        key = self._key_for(filename)
-        try:
-            self.client.head_object(Bucket=self.bucket_name, Key=key)
-            return True
-        except ClientError as exc:
-            error_code = exc.response.get("Error", {}).get("Code", "")
-            if error_code in ("404", "NoSuchKey"):
-                return False
-            raise RuntimeError(f"Failed to check '{filename}' in S3: {exc}") from exc
+        return self._find_key(filename) is not None
 
     def list_files(self) -> List[str]:
-        """Return the basenames of every object stored under prefix in the bucket."""
-        filenames: List[str] = []
+        """Return the basenames of every object stored under any configured
+        prefix in the bucket (deduplicated, sorted)."""
+        filenames: set[str] = set()
         paginator = self.client.get_paginator("list_objects_v2")
-        try:
-            for page in paginator.paginate(Bucket=self.bucket_name, Prefix=self.prefix):
-                for obj in page.get("Contents", []):
-                    key = obj["Key"]
-                    if key == self.prefix:  # the "folder" marker object itself, if any
-                        continue
-                    filenames.append(os.path.basename(key))
-        except ClientError as exc:
-            raise RuntimeError(f"Failed to list objects in S3 bucket '{self.bucket_name}': {exc}") from exc
+        for prefix in self.prefixes:
+            try:
+                for page in paginator.paginate(Bucket=self.bucket_name, Prefix=prefix):
+                    for obj in page.get("Contents", []):
+                        key = obj["Key"]
+                        if key == prefix:  # the "folder" marker object itself, if any
+                            continue
+                        filenames.add(os.path.basename(key))
+            except ClientError as exc:
+                raise RuntimeError(
+                    f"Failed to list objects in S3 bucket '{self.bucket_name}' "
+                    f"under prefix '{prefix}': {exc}"
+                ) from exc
 
         return sorted(filenames)
 
     def rename_file(self, old_filename: str, new_filename: str) -> None:
         """Rename an object in S3 by copying it to the new key and deleting
         the old one (S3 has no atomic rename). Used by the canonical naming
-        migration; no-op if old_filename == new_filename."""
+        migration; no-op if old_filename == new_filename.
+
+        Renames in place under whichever configured prefix the file was
+        actually found in."""
         if old_filename == new_filename:
             return
-        old_key = self._key_for(old_filename)
-        new_key = self._key_for(new_filename)
+        old_key = self._find_key(old_filename)
+        if old_key is None:
+            logger.warning(
+                "Could not rename '%s' -> '%s' in S3: not found under any configured prefix.",
+                old_filename, new_filename,
+            )
+            return
+        prefix = old_key[: len(old_key) - len(old_filename)]
+        new_key = self._key_for(new_filename, prefix)
         try:
             self.client.copy_object(
                 Bucket=self.bucket_name,
@@ -149,8 +196,9 @@ class S3Storage:
         logger.info("Renamed S3 object '%s' -> '%s'.", old_filename, new_filename)
 
     def sync_down(self, local_folder: str) -> List[str]:
-        """Download every S3 object not already present locally into
-        local_folder. Returns the list of filenames actually downloaded."""
+        """Download every S3 object (across all configured prefixes) not
+        already present locally into local_folder. Returns the list of
+        filenames actually downloaded."""
         os.makedirs(local_folder, exist_ok=True)
         downloaded: List[str] = []
 

@@ -47,10 +47,16 @@ When generating a dual Video Script + Story pair, the request will additionally 
 Topic: {topic}
 Learning Objectives: {learning_objectives}
 
-In dual mode, ignore the "REQUIRED SCRIPT FORMAT" above (the ".mp4"/TRT/Narrative Script header) and instead produce exactly two panels, in this order, using the Topic + Learning Objectives + TRAINING CONTENT above:
+In dual mode, produce exactly two panels, in this order, using the Topic + Learning Objectives + TRAINING CONTENT above:
 
 LEFT PANEL
-A professional training video script as a scene-by-scene table. For every scene include: Scene Number, Visual Description, Camera Direction, Narration, On-screen Action, Transition. Suitable for an educational safety training video; narration engaging and easy to understand.
+The video script, written in EXACTLY the same cinematic narration format as the "REQUIRED SCRIPT FORMAT" section above — do not use a scene table. That means, in order:
+* Line 1: Story - <the invented character's name>.mp4
+* Line 2: TRT: <MM:SS>
+* Line 3: Narrative Script:
+* Then the narration body: bracketed stage/visual directions like [Opening Scene: ...] and [Visual: ...] at the opening, key transitions, and the close; "Narrator (Trainer):" on its own line before each spoken block, followed by the narration in quotation marks, in a warm, conversational, first-person storytelling voice; a short "let's break this down" passage naming the underlying concept(s)/terminology/statistics from the TRAINING CONTENT; a closing scene direction; and a short reflective question posed directly to the audience.
+* Build this LEFT PANEL's story around the same invented character ({seed_character_name}, working in {seed_workplace}) and the same incident used in the RIGHT PANEL story below — the two panels should read as the same story told two ways (cinematic narration vs. first-person account), not two unrelated incidents.
+* No headings, bullet points, or numbered lists anywhere inside the narration body — the only structural markers are the bracketed scene/visual directions and the "Narrator (Trainer):" labels.
 
 RIGHT PANEL
 A realistic first-person story — a real worker sharing what happened after an incident, following this flow woven into natural prose (never as labeled sections): introduce yourself and your profession; describe the activity; explain why this day was different; build tension; describe the small decisions that led to the incident; describe the incident; explain the consequence; reflect; explain how it could have been much worse; end with what you learned.

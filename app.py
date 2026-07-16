@@ -49,6 +49,8 @@ from config.settings import settings  # noqa: E402
 from services.pdf_parser import PDFParser  # noqa: E402
 from services.docx_parser import DocxParser  # noqa: E402
 from services.excel_parser import ExcelParser  # noqa: E402
+from services.pptx_parser import PptxParser  # noqa: E402
+from services.image_parser import ImageParser, IMAGE_EXTENSIONS  # noqa: E402
 from services.s3_storage import S3Storage  # noqa: E402
 from services.chunking import Chunk, DocumentChunker, SemanticChunkingService  # noqa: E402
 from services.embeddings import EmbeddingService  # noqa: E402
@@ -76,7 +78,9 @@ from services.canonical_naming import canonical_filename, is_canonical  # noqa: 
 # own parser (PDFParser / DocxParser / ExcelParser) but all of them emit the
 # same PageContent objects, so everything downstream (chunking, embedding,
 # Qdrant storage, retrieval) is identical regardless of source format.
-SUPPORTED_EXTENSIONS = (".pdf", ".docx", ".xlsx", ".xlsm", ".xls", ".csv")
+SUPPORTED_EXTENSIONS = (
+    ".pdf", ".docx", ".xlsx", ".xlsm", ".xls", ".csv", ".pptx",
+) + IMAGE_EXTENSIONS
 
 # ---------------------------------------------------------------------------
 # Cached resources — heavy objects loaded once per process.
@@ -363,6 +367,35 @@ def ingest_single_excel(file_path: str, embedding_service: EmbeddingService,
     return len(chunks)
 
 
+def ingest_single_pptx(file_path: str, embedding_service: EmbeddingService,
+                        qdrant_service: QdrantService) -> int:
+    """Ingest a .pptx training-content file the same way ingest_single_docx
+    ingests a Word doc. Slides give a natural per-page unit (see
+    PptxParser.extract_pages), but there's no PDF-style TOC step here."""
+    parser = PptxParser(pptx_folder=settings.PDF_FOLDER)
+    chunks = parse_and_chunk(file_path, embedding_service, parser=parser)
+    if not chunks:
+        return 0
+
+    _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service)
+
+    return len(chunks)
+
+
+def ingest_single_image(file_path: str, embedding_service: EmbeddingService,
+                         qdrant_service: QdrantService) -> int:
+    """Ingest a standalone image via Docker Tesseract OCR (see
+    ImageParser), the same OCR path used for scanned PDF pages."""
+    parser = ImageParser(image_folder=settings.PDF_FOLDER)
+    chunks = parse_and_chunk(file_path, embedding_service, parser=parser)
+    if not chunks:
+        return 0
+
+    _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service)
+
+    return len(chunks)
+
+
 def ingest_document_by_extension(
     dest_path: str,
     embedding_service: EmbeddingService,
@@ -371,7 +404,8 @@ def ingest_document_by_extension(
     """Dispatch a single file to the right ingest_single_* function based on
     its extension. Shared by the manual upload button and the S3 sync flow
     so both paths stay in sync as new extensions are added.
-    Supports: .pdf, .docx, .xlsx, .xlsm, .xls, .csv
+    Supports: .pdf, .docx, .xlsx, .xlsm, .xls, .csv, .pptx, and image files
+    (.png, .jpg, .jpeg, .webp, .bmp, .tiff)
     """
     file_ext = os.path.splitext(dest_path)[1].lower()
 
@@ -379,6 +413,10 @@ def ingest_document_by_extension(
         return ingest_single_docx(dest_path, embedding_service, qdrant_service)
     elif file_ext in (".xlsx", ".xlsm", ".xls", ".csv"):
         return ingest_single_excel(dest_path, embedding_service, qdrant_service)
+    elif file_ext == ".pptx":
+        return ingest_single_pptx(dest_path, embedding_service, qdrant_service)
+    elif file_ext in IMAGE_EXTENSIONS:
+        return ingest_single_image(dest_path, embedding_service, qdrant_service)
     elif file_ext == ".pdf":
         return ingest_single_pdf(dest_path, embedding_service, qdrant_service)
     else:
@@ -667,8 +705,9 @@ with st.sidebar:
 
     st.header("📤 Upload a document")
     uploaded_file = st.file_uploader(
-        "Choose a PDF, Word, Excel, or CSV document",
-        type=["pdf", "docx", "xlsx", "xlsm", "xls", "csv"],
+        "Choose a PDF, Word, PowerPoint, Excel, CSV, or image document",
+        type=["pdf", "docx", "pptx", "xlsx", "xlsm", "xls", "csv",
+              "png", "jpg", "jpeg", "webp", "bmp", "tiff"],
     )
 
     if uploaded_file is not None:

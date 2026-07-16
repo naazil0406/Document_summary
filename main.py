@@ -35,6 +35,8 @@ from config.settings import settings
 from services.pdf_parser import PDFParser
 from services.docx_parser import DocxParser
 from services.excel_parser import ExcelParser
+from services.pptx_parser import PptxParser
+from services.image_parser import ImageParser, IMAGE_EXTENSIONS
 from services.s3_storage import S3Storage
 from services.chunking import Chunk, DocumentChunker, SemanticChunkingService
 from services.embeddings import EmbeddingService
@@ -56,7 +58,9 @@ from services.image_generation_service import HuggingFaceFluxService, Pollinatio
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_EXTENSIONS = (".pdf", ".docx", ".xlsx", ".xlsm", ".xls", ".csv")
+SUPPORTED_EXTENSIONS = (
+    ".pdf", ".docx", ".xlsx", ".xlsm", ".xls", ".csv", ".pptx",
+) + IMAGE_EXTENSIONS
 
 # ===========================================================================
 # Cached resources — heavy objects loaded once per process (replaces
@@ -391,12 +395,34 @@ def ingest_single_excel(file_path: str, embedding_service, qdrant_service, restr
     return len(chunks)
 
 
+def ingest_single_pptx(file_path: str, embedding_service, qdrant_service) -> int:
+    parser = PptxParser(pptx_folder=settings.PDF_FOLDER)
+    chunks = parse_and_chunk(file_path, embedding_service, parser=parser)
+    if not chunks:
+        return 0
+    _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service)
+    return len(chunks)
+
+
+def ingest_single_image(file_path: str, embedding_service, qdrant_service) -> int:
+    parser = ImageParser(image_folder=settings.PDF_FOLDER)
+    chunks = parse_and_chunk(file_path, embedding_service, parser=parser)
+    if not chunks:
+        return 0
+    _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service)
+    return len(chunks)
+
+
 def ingest_document_by_extension(dest_path: str, embedding_service, qdrant_service) -> int:
     file_ext = os.path.splitext(dest_path)[1].lower()
     if file_ext == ".docx":
         return ingest_single_docx(dest_path, embedding_service, qdrant_service)
     elif file_ext in (".xlsx", ".xlsm", ".xls", ".csv"):
         return ingest_single_excel(dest_path, embedding_service, qdrant_service)
+    elif file_ext == ".pptx":
+        return ingest_single_pptx(dest_path, embedding_service, qdrant_service)
+    elif file_ext in IMAGE_EXTENSIONS:
+        return ingest_single_image(dest_path, embedding_service, qdrant_service)
     elif file_ext == ".pdf":
         return ingest_single_pdf(dest_path, embedding_service, qdrant_service)
     else:

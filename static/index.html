@@ -1206,10 +1206,8 @@ button { font-family: inherit; cursor: pointer; }
     <section class="panel" id="panel-videostory">
       <header class="panel-head">
         <h1>Generate a video script &amp; story</h1>
-        <p>It picks its own topic from your Knowledge Base and generates a scene-by-scene video script and a realistic first-person incident story together — both teaching the same lesson. Click Script or Story to switch views.</p>
+        <p>It picks its own topic from your Knowledge Base and generates a cinematic narration video script and a realistic first-person incident story together — both telling the same story from two angles. Click Script or Story to switch views.</p>
         <form class="vs-composer" id="vsComposerForm">
-          <input type="text" name="objectives" id="vsObjectivesInput" placeholder="Learning objectives (optional)" autocomplete="off" />
-          <input type="text" name="label" id="vsNameInput" placeholder="Name this pair (optional)" autocomplete="off" />
           <button type="submit" class="primary-btn" id="generateVsBtn">Generate</button>
         </form>
       </header>
@@ -1707,8 +1705,8 @@ button { font-family: inherit; cursor: pointer; }
 
   document.getElementById("vsComposerForm").addEventListener("submit", async (e) => {
     e.preventDefault();
-    const learning_objectives = document.getElementById("vsObjectivesInput").value.trim();
-    const name = document.getElementById("vsNameInput").value.trim();
+    const learning_objectives = "";
+    const name = null;
 
     const btn = document.getElementById("generateVsBtn");
     btn.disabled = true;

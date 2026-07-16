@@ -20,6 +20,8 @@ from config.settings import settings
 from services.pdf_parser import PDFParser
 from services.docx_parser import DocxParser
 from services.excel_parser import ExcelParser
+from services.pptx_parser import PptxParser
+from services.image_parser import ImageParser, IMAGE_EXTENSIONS
 from services.chunking import Chunk, DocumentChunker, SemanticChunkingService
 from services.embeddings import EmbeddingService
 from services.qdrant_db import QdrantService
@@ -28,7 +30,9 @@ from services.canonical_naming import canonical_filename, is_canonical
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_INGESTION_EXTENSIONS = (".pdf", ".docx", ".xlsx", ".xlsm", ".xls", ".csv")
+SUPPORTED_INGESTION_EXTENSIONS = (
+    ".pdf", ".docx", ".xlsx", ".xlsm", ".xls", ".csv", ".pptx",
+) + IMAGE_EXTENSIONS
 
 
 def _list_ingestable_files(folder: str) -> list[str]:
@@ -48,6 +52,10 @@ def _select_parser(file_path: str, folder: str):
         return ExcelParser(excel_folder=folder)
     if ext == ".docx":
         return DocxParser(docx_folder=folder)
+    if ext == ".pptx":
+        return PptxParser(pptx_folder=folder)
+    if ext in IMAGE_EXTENSIONS:
+        return ImageParser(image_folder=folder)
     return PDFParser(pdf_folder=folder)
 
 
