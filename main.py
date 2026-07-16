@@ -53,7 +53,7 @@ from services.document_resolver import (
     resolve_summary_request,
     ambiguous_candidates,
 )
-from services.canonical_naming import canonical_filename, is_canonical
+from services.canonical_naming import canonical_filename, is_canonical, current_month_folder
 from services.image_generation_service import HuggingFaceFluxService, PollinationsImageService, NovaCanvasService
 
 logger = logging.getLogger(__name__)
@@ -254,13 +254,58 @@ def get_presentation_llm() -> OpenRouterLLMService:
 # ===========================================================================
 # Orchestration logic — ported 1:1 from app.py, with st.* calls removed.
 # ===========================================================================
-def resolve_filename(name: str, pdf_folder: str):
+def _list_all_documents(pdf_folder: str) -> List[str]:
+    """Basenames of every supported document under pdf_folder -- both
+    legacy flat files directly in pdf_folder and files inside a month
+    subfolder (e.g. pdf_folder/july/<file>). Identifiers used throughout
+    the app (Qdrant, cache, UI) are always the bare filename; which month
+    subfolder a file physically lives in is an on-disk storage detail."""
+    found: set[str] = set()
     try:
-        candidates = [
-            f for f in os.listdir(pdf_folder) if f.lower().endswith(SUPPORTED_EXTENSIONS)
-        ]
+        for entry in os.listdir(pdf_folder):
+            full = os.path.join(pdf_folder, entry)
+            if os.path.isfile(full):
+                if entry.lower().endswith(SUPPORTED_EXTENSIONS):
+                    found.add(entry)
+            elif os.path.isdir(full):
+                for f in os.listdir(full):
+                    if f.lower().endswith(SUPPORTED_EXTENSIONS):
+                        found.add(f)
     except OSError:
-        return None
+        pass
+    return sorted(found)
+
+
+def local_read_path(filename: str) -> str:
+    """Resolve `filename` to wherever it actually lives on disk: inside a
+    month subfolder (current convention) or directly in PDF_FOLDER (legacy
+    files saved before month folders existed). Falls back to the flat
+    PDF_FOLDER path if the file isn't found anywhere, so callers still get
+    a sensible path to report as missing."""
+    root = settings.PDF_FOLDER
+    flat = os.path.join(root, filename)
+    if os.path.isfile(flat):
+        return flat
+    if os.path.isdir(root):
+        for entry in os.listdir(root):
+            month_dir = os.path.join(root, entry)
+            candidate = os.path.join(month_dir, filename)
+            if os.path.isdir(month_dir) and os.path.isfile(candidate):
+                return candidate
+    return flat
+
+
+def local_write_path(filename: str) -> str:
+    """Destination path for a newly saved file -- always under the current
+    month's subfolder (e.g. data/pdfs/july/<filename>), matching the S3
+    bucket's monthly-folder convention. Creates the subfolder if needed."""
+    month_dir = os.path.join(settings.PDF_FOLDER, current_month_folder())
+    os.makedirs(month_dir, exist_ok=True)
+    return os.path.join(month_dir, filename)
+
+
+def resolve_filename(name: str, pdf_folder: str):
+    candidates = _list_all_documents(pdf_folder)
     return resolve_pdf_reference(name, candidates)
 
 
@@ -822,9 +867,7 @@ def generate_learning_feed_item(
 def summarize_indexed_document(name: str, qdrant_service, summary_llm) -> str:
     chunks = _get_all_chunks(name, qdrant_service)
     if chunks is None:
-        available = ", ".join(
-            f for f in os.listdir(settings.PDF_FOLDER) if f.lower().endswith(SUPPORTED_EXTENSIONS)
-        ) if os.path.isdir(settings.PDF_FOLDER) else "(folder not found)"
+        available = ", ".join(existing_documents()) if os.path.isdir(settings.PDF_FOLDER) else "(folder not found)"
         raise ValueError(
             f"File not found for '{name}' in {settings.PDF_FOLDER}. "
             f"Available documents: {available or 'none'}"
@@ -899,9 +942,7 @@ def generate_suggested_questions(llm_service, summary_text: str, filename: str) 
 
 def existing_documents() -> List[str]:
     os.makedirs(settings.PDF_FOLDER, exist_ok=True)
-    return sorted(
-        f for f in os.listdir(settings.PDF_FOLDER) if f.lower().endswith(SUPPORTED_EXTENSIONS)
-    )
+    return _list_all_documents(settings.PDF_FOLDER)
 
 
 # ===========================================================================
@@ -1039,8 +1080,7 @@ async def upload_document(file: UploadFile = File(...)):
     # unambiguous -- never the raw uploaded name.
     filename = canonical_filename(original_filename)
 
-    os.makedirs(settings.PDF_FOLDER, exist_ok=True)
-    dest_path = os.path.join(settings.PDF_FOLDER, filename)
+    dest_path = local_write_path(filename)
     contents = await file.read()
     with open(dest_path, "wb") as f:
         f.write(contents)
@@ -1112,7 +1152,7 @@ def summarize_document(filename: str):
 @app.delete("/api/documents/{filename}")
 def delete_document(filename: str):
     qdrant_service = get_qdrant_service()
-    local_path = os.path.join(settings.PDF_FOLDER, filename)
+    local_path = local_read_path(filename)
 
     removed_local = False
     if os.path.isfile(local_path):
@@ -1127,13 +1167,13 @@ def delete_document(filename: str):
     s3_storage = get_s3_storage()
     removed_s3 = False
     if s3_storage:
-        try:
-            s3_storage.client.delete_object(
-                Bucket=s3_storage.bucket_name, Key=s3_storage._key_for(filename)
-            )
-            removed_s3 = True
-        except Exception as exc:
-            logger.warning("Could not delete '%s' from S3: %s", filename, exc)
+        s3_key = s3_storage._find_key(filename)
+        if s3_key:
+            try:
+                s3_storage.client.delete_object(Bucket=s3_storage.bucket_name, Key=s3_key)
+                removed_s3 = True
+            except Exception as exc:
+                logger.warning("Could not delete '%s' from S3: %s", filename, exc)
 
     _summary_cache.pop(filename, None)
 
@@ -1165,8 +1205,10 @@ def sync_from_s3():
         if is_canonical(filename):
             continue
         new_name = canonical_filename(filename)
-        old_path = os.path.join(settings.PDF_FOLDER, filename)
-        new_path = os.path.join(settings.PDF_FOLDER, new_name)
+        old_path = local_read_path(filename)
+        # Rename in place -- keep whatever month subfolder it's already in
+        # rather than moving it to the current month.
+        new_path = os.path.join(os.path.dirname(old_path), new_name)
         try:
             os.rename(old_path, new_path)
             s3_storage.rename_file(filename, new_name)
@@ -1184,7 +1226,7 @@ def sync_from_s3():
     indexed = []
     errors = {}
     for filename in pending:
-        dest_path = os.path.join(settings.PDF_FOLDER, filename)
+        dest_path = local_read_path(filename)
         try:
             ingest_document_by_extension(dest_path, embedding_service, qdrant_service)
             indexed.append(filename)

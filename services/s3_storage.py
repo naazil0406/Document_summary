@@ -38,6 +38,8 @@ from typing import List, Optional
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
 
+from services.canonical_naming import current_month_folder
+
 logger = logging.getLogger(__name__)
 
 
@@ -92,10 +94,37 @@ class S3Storage:
         prefix = self.prefix if prefix is None else prefix
         return f"{prefix}{filename}"
 
+    def _discover_root_prefixes(self) -> List[str]:
+        """List every top-level "folder" that actually exists in the
+        bucket (e.g. "july/", "august/"), so monthly folders already
+        present in the bucket are always searched -- no need to list each
+        one in S3_PREFIX by hand."""
+        prefixes: List[str] = []
+        try:
+            paginator = self.client.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=self.bucket_name, Delimiter="/"):
+                for common in page.get("CommonPrefixes", []):
+                    prefixes.append(common["Prefix"])
+        except ClientError as exc:
+            logger.warning("Could not auto-discover S3 folders in '%s': %s", self.bucket_name, exc)
+        return prefixes
+
+    def _all_prefixes(self) -> List[str]:
+        """Configured prefixes plus every folder discovered at the bucket
+        root, deduplicated, configured ones first."""
+        merged: List[str] = []
+        for p in self.prefixes + self._discover_root_prefixes():
+            if p not in merged:
+                merged.append(p)
+        return merged
+
     def upload_file(self, local_path: str, filename: str) -> str:
-        """Upload a local file to S3 under the primary (first) prefix.
-        Returns the s3:// URI it was stored at."""
-        key = self._key_for(filename)
+        """Upload a local file to S3 under the current month's folder
+        (e.g. "july/<filename>"), auto-detected from today's date to match
+        the bucket's existing monthly-folder layout. Returns the s3://
+        URI it was stored at."""
+        month_prefix = _normalize_prefix(current_month_folder())
+        key = self._key_for(filename, prefix=month_prefix)
         try:
             self.client.upload_file(local_path, self.bucket_name, key)
         except NoCredentialsError as exc:
@@ -112,8 +141,9 @@ class S3Storage:
 
     def _find_key(self, filename: str) -> Optional[str]:
         """Return the first existing key for filename across all configured
-        prefixes, or None if it doesn't exist under any of them."""
-        for prefix in self.prefixes:
+        AND auto-discovered (e.g. monthly) prefixes, or None if it doesn't
+        exist under any of them."""
+        for prefix in self._all_prefixes():
             key = self._key_for(filename, prefix)
             try:
                 self.client.head_object(Bucket=self.bucket_name, Key=key)
@@ -148,7 +178,7 @@ class S3Storage:
         prefix in the bucket (deduplicated, sorted)."""
         filenames: set[str] = set()
         paginator = self.client.get_paginator("list_objects_v2")
-        for prefix in self.prefixes:
+        for prefix in self._all_prefixes():
             try:
                 for page in paginator.paginate(Bucket=self.bucket_name, Prefix=prefix):
                     for obj in page.get("Contents", []):
@@ -196,17 +226,28 @@ class S3Storage:
         logger.info("Renamed S3 object '%s' -> '%s'.", old_filename, new_filename)
 
     def sync_down(self, local_folder: str) -> List[str]:
-        """Download every S3 object (across all configured prefixes) not
-        already present locally into local_folder. Returns the list of
-        filenames actually downloaded."""
+        """Download every S3 object (across all configured + discovered
+        prefixes) not already present locally into local_folder, mirroring
+        whatever month subfolder it lives under in the bucket (e.g. an
+        object at "july/<file>" lands at "<local_folder>/july/<file>").
+        Returns the list of filenames actually downloaded."""
         os.makedirs(local_folder, exist_ok=True)
         downloaded: List[str] = []
 
         for filename in self.list_files():
-            local_path = os.path.join(local_folder, filename)
+            key = self._find_key(filename)
+            if key is None:
+                continue
+            subfolder = key[: len(key) - len(filename)].strip("/")
+            local_dir = os.path.join(local_folder, subfolder) if subfolder else local_folder
+            os.makedirs(local_dir, exist_ok=True)
+            local_path = os.path.join(local_dir, filename)
             if os.path.isfile(local_path):
                 continue
-            if self.download_file(filename, local_path):
-                downloaded.append(filename)
+            try:
+                self.client.download_file(self.bucket_name, key, local_path)
+            except ClientError as exc:
+                raise RuntimeError(f"Failed to download '{filename}' from S3: {exc}") from exc
+            downloaded.append(filename)
 
         return downloaded
