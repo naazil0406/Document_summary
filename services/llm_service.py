@@ -21,7 +21,7 @@ import logging
 import os
 import random
 import re
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import boto3
 import requests
@@ -502,10 +502,21 @@ class BaseLLMService:
                 f"did not return valid JSON: {exc}\nRaw response: {response[:500]}"
             ) from exc
 
-    def generate_image_prompt(self, user_query: str, chunks: List[dict]) -> str:
+    def generate_image_prompt(self, user_query: str, chunks: List[dict], mode: str = "infographic") -> str:
         """Nova Lite step of the image pipeline: turn a user's image request
         plus retrieved RAG chunks into ONE optimized natural-language prompt
         for Nova Canvas.
+
+        mode: "infographic" (flat vector/iconographic explainer visual) or
+        "scene" (photorealistic cinematic single moment, no text/icons).
+        This is passed through explicitly as an "Output Mode:" line so
+        image_prompt_system.txt never has to infer/guess the mode from the
+        wording of user_query — see that file's "OUTPUT MODE" section.
+        Content types that describe a real situation (Scenario, Spot the
+        Mistake Challenge, AI Image) should use "scene"; conceptual/
+        explainer content types (Recall Card, Infographic, Flashcard,
+        Daily Quiz, Fun Fact, Reflection Question, Safety/Best Practice
+        Tip) should use "infographic".
 
         This must return a single continuous descriptive paragraph — no
         markdown, no JSON, no bullet points — per the image_prompt_system.txt
@@ -516,9 +527,13 @@ class BaseLLMService:
         separate user-prompt .txt template — the system prompt alone fully
         specifies the task, so the user turn is just the request + context.
         """
+        if mode not in ("infographic", "scene"):
+            mode = "infographic"
+
         system_prompt = load_image_prompt_system_prompt()
         retrieved_chunks = format_context(chunks)
         user_prompt = (
+            f"Output Mode: {mode}\n\n"
             f"User Request: {user_query}\n\n"
             f"Retrieved Context:\n{retrieved_chunks}"
         )
@@ -535,11 +550,32 @@ class BaseLLMService:
             raise RuntimeError("Nova Lite returned an empty image prompt.")
         return image_prompt
 
-    def generate_learning_content(self, content_type: str, topic: str, chunks: List[dict]) -> str:
+    def generate_learning_content(
+        self,
+        content_type: str,
+        topic: str,
+        chunks: List[dict],
+        monthly_topic_content: Optional[str] = None,
+        common_data: Optional[str] = None,
+        web_results: Optional[str] = None,
+    ) -> str:
         """Content Generation Agent: turn (Content Type + Topic + retrieved
         Knowledge Base chunks) into one short, original piece of
         learner-facing content — never copied from the Knowledge Base or
         the internet, per prompts/content_generation_system.txt.
+
+        monthly_topic_content / common_data / web_results are optional
+        extra sources described in the system prompt:
+          - monthly_topic_content: this month's featured lesson material,
+            treated as a primary fact source alongside Retrieved Context.
+          - common_data: general human-performance background used only
+            for understanding, never quoted.
+          - web_results: supplementary internet research used only to
+            enrich with a real-world example/best practice, never a
+            source of wording. Callers are responsible for fetching this
+            (e.g. via a web search step) before calling this method.
+        All three default to None/omitted so existing callers that only
+        pass (content_type, topic, chunks) keep working unchanged.
 
         Like generate_image_prompt(), this prompt pair has no separate
         user-prompt .txt template; the system prompt fully specifies the
@@ -558,6 +594,13 @@ class BaseLLMService:
             f"Topic: {topic}\n\n"
             f"Retrieved Context:\n{retrieved_chunks}"
         )
+        if monthly_topic_content and monthly_topic_content.strip():
+            user_prompt += f"\n\nMonthly Topic Content:\n{monthly_topic_content.strip()}"
+        if common_data and common_data.strip():
+            user_prompt += f"\n\nCommon Knowledge:\n{common_data.strip()}"
+        if web_results and web_results.strip():
+            user_prompt += f"\n\nInternet Research:\n{web_results.strip()}"
+
         content_text = self._call_llm(system_prompt, user_prompt).strip()
 
         # Defensive cleanup: models occasionally wrap output in quotes,

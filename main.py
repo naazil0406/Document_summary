@@ -770,16 +770,12 @@ def generate_document_image(
         if not chunks:
             raise ValueError("No relevant context was found in the indexed documents for this request.")
 
-    image_prompt = image_prompt_llm.generate_image_prompt(query, chunks)
-
-    # Reinforce the infographic-style default from image_prompt_system.txt
-    # at the renderer level too, in case the user's request nudges the
-    # model back toward a realistic photo/scene.
-    negative_prompt = (
-        "photorealistic, realistic photo, photograph, cinematic lighting, "
-        "realistic human faces, realistic skin texture, depth of field, "
-        "camera bokeh, film grain, 3D render of real people, blurry, low detail"
-    )
+    # This standalone endpoint has always been infographic-only (it predates
+    # the Scenario/Spot-the-Mistake "scene" mode added for the Learning
+    # Content Generation Engine below), so the mode is pinned explicitly
+    # rather than left to a default.
+    image_prompt = image_prompt_llm.generate_image_prompt(query, chunks, mode="infographic")
+    negative_prompt = _negative_prompt_for_mode("infographic")
     image_bytes = image_gen_service.generate_image(image_prompt, negative_prompt=negative_prompt)
     saved_path = save_generated_image(image_bytes, label=query[:40])
 
@@ -790,6 +786,42 @@ def generate_document_image(
     }
 
 
+# Which image strategy each Content Type should use. Content types that
+# describe one real, concrete situation get a photorealistic cinematic
+# "scene" image (a still frame from a training video); conceptual/explainer
+# content types keep the original flat-vector "infographic" look. See
+# prompts/image_prompt_system.txt for what each mode actually produces.
+_SCENE_MODE_CONTENT_TYPES = {"Scenario", "Spot the Mistake Challenge", "AI Image"}
+
+
+def _image_mode_for_content_type(content_type: str) -> str:
+    return "scene" if content_type in _SCENE_MODE_CONTENT_TYPES else "infographic"
+
+
+# Negative prompts are mode-specific: a "scene" image needs photorealism
+# and cinematic lighting, so the old blanket negative prompt (which banned
+# exactly those things) actively fought against Scenario/Spot-the-Mistake
+# images ever looking realistic. An "infographic" image still wants to
+# avoid photorealism, so it keeps close to the original negative prompt.
+_INFOGRAPHIC_NEGATIVE_PROMPT = (
+    "photorealistic, realistic photo, photograph, cinematic lighting, "
+    "realistic human faces, realistic skin texture, depth of field, "
+    "camera bokeh, film grain, 3D render of real people, blurry, low detail, "
+    "watermarks, logos"
+)
+_SCENE_NEGATIVE_PROMPT = (
+    "infographic, icon, iconographic illustration, flat vector illustration, "
+    "diagram, chart, flowchart, numbered steps, labeled boxes, comparison "
+    "columns, collage, grid of panels, cartoon, clip art, text, captions, "
+    "titles, labels, watermarks, logos, low quality, blurry, distorted "
+    "anatomy, extra limbs"
+)
+
+
+def _negative_prompt_for_mode(mode: str) -> str:
+    return _SCENE_NEGATIVE_PROMPT if mode == "scene" else _INFOGRAPHIC_NEGATIVE_PROMPT
+
+
 def generate_learning_feed_item(
     content_type: str,
     topic: str,
@@ -797,6 +829,9 @@ def generate_learning_feed_item(
     content_llm,
     image_prompt_llm,
     image_gen_service,
+    monthly_topic_content: Optional[str] = None,
+    common_data: Optional[str] = None,
+    web_results: Optional[str] = None,
 ) -> dict:
     """End-to-end Learning Content Generation Engine pipeline for one feed
     item:
@@ -804,13 +839,21 @@ def generate_learning_feed_item(
       1. Knowledge Extraction — retrieve the Topic from the Knowledge Base
          (Qdrant, via retriever.retrieve()).
       2. Content Generation Agent — turn (Content Type + Topic + retrieved
-         chunks) into one short, original piece of learner-facing text
-         (services/llm_service.py generate_learning_content()).
+         chunks, plus optional Monthly Topic Content / Common Knowledge /
+         Internet Research) into one short, original piece of
+         learner-facing text (services/llm_service.py
+         generate_learning_content()).
       3. Image Prompt Generation Agent — turn (the generated text + Topic)
          into one optimized image-generation prompt (Nova Lite, the same
          generate_image_prompt() the standalone image pipeline uses).
       4. Image Generation Agent — render that prompt into an image via
          whichever backend settings.IMAGE_PROVIDER selects.
+
+    monthly_topic_content / common_data / web_results are all optional —
+    when omitted, this behaves exactly as before. web_results in
+    particular is expected to be pre-fetched by the caller (e.g. a web
+    search step upstream); this function does not perform web search
+    itself.
 
     Every content type gets an image: the image prompt is always derived
     from the LLM-generated content_text (never the raw topic string alone),
@@ -837,20 +880,25 @@ def generate_learning_feed_item(
             "Upload and process the relevant document first."
         )
 
-    content_text = content_llm.generate_learning_content(content_type, topic, chunks)
+    content_text = content_llm.generate_learning_content(
+        content_type,
+        topic,
+        chunks,
+        monthly_topic_content=monthly_topic_content,
+        common_data=common_data,
+        web_results=web_results,
+    )
 
     # The Image Prompt Generation Agent (Nova Lite) is driven by what the
     # content actually says, not just the bare topic, so the image matches
-    # the specific fact/scenario/question generated above.
+    # the specific fact/scenario/question generated above. Which visual
+    # strategy it uses (photorealistic scene vs. flat-vector infographic)
+    # is chosen explicitly by content_type, not inferred from wording.
+    image_mode = _image_mode_for_content_type(content_type)
     image_query = f"{content_type} about \"{topic}\": {content_text}"
-    image_prompt = image_prompt_llm.generate_image_prompt(image_query, chunks)
+    image_prompt = image_prompt_llm.generate_image_prompt(image_query, chunks, mode=image_mode)
 
-    negative_prompt = (
-        "photorealistic, realistic photo, photograph, cinematic lighting, "
-        "realistic human faces, realistic skin texture, depth of field, "
-        "camera bokeh, film grain, 3D render of real people, blurry, low detail, "
-        "text, captions, logos, watermarks"
-    )
+    negative_prompt = _negative_prompt_for_mode(image_mode)
     image_bytes = image_gen_service.generate_image(image_prompt, negative_prompt=negative_prompt)
     saved_path = save_generated_image(image_bytes, label=f"{content_type}_{topic[:30]}")
 
@@ -1028,6 +1076,11 @@ class ImageGenResponse(BaseModel):
 class ContentGenRequest(BaseModel):
     content_type: str
     topic: str
+    # Optional extra sources described in prompts/content_generation_system.txt.
+    # All default to None so existing callers keep working unchanged.
+    monthly_topic_content: Optional[str] = None
+    common_data: Optional[str] = None
+    web_results: Optional[str] = None
 
 
 class ContentGenResponse(BaseModel):
@@ -1555,7 +1608,15 @@ def generate_content(req: ContentGenRequest):
 
     try:
         result = generate_learning_feed_item(
-            content_type, topic, retriever, content_llm, image_prompt_llm, image_gen_service
+            content_type,
+            topic,
+            retriever,
+            content_llm,
+            image_prompt_llm,
+            image_gen_service,
+            monthly_topic_content=req.monthly_topic_content,
+            common_data=req.common_data,
+            web_results=req.web_results,
         )
     except ValueError as exc:
         raise HTTPException(404, str(exc))
