@@ -615,11 +615,14 @@ class BaseLLMService:
             raise RuntimeError(f"The model returned no content for '{content_type}' on topic '{topic}'.")
         return content_text
 
-    def generate_video_and_story(self, learning_objectives: str, chunks: List[dict]) -> Tuple[str, str]:
+    def generate_video_and_story(self, learning_objectives: str, chunks: List[dict]) -> Tuple[str, str, str]:
         """Generate the dual Video Script + Story training output
         (the 'DUAL-OUTPUT MODE' section of prompts/presentation_prompt.txt)
         in a single LLM call, then split the response into
-        (video_script, story).
+        (video_script, story, seed_character_name). seed_character_name is
+        returned as-is (not re-parsed from the story text) so callers can
+        reliably label saved files after the invented storyteller, since
+        the model's self-introduction phrasing in the story can vary.
 
         No topic is passed in — the model selects whatever topic/lesson the
         Knowledge Base content best supports on its own.
@@ -645,7 +648,8 @@ class BaseLLMService:
         )
         user_prompt = "Generate the LEFT PANEL video script and the RIGHT PANEL story now, following the required format exactly."
         raw_output = self._call_llm(system_prompt, user_prompt)
-        return self._split_video_story_panels(raw_output)
+        video_script, story = self._split_video_story_panels(raw_output)
+        return video_script, story, seed_character_name
 
     @staticmethod
     def _split_video_story_panels(raw_output: str) -> Tuple[str, str]:

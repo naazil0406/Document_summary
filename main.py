@@ -1296,20 +1296,22 @@ def sync_from_s3():
 
 
 _FIRST_PERSON_NAME_PATTERN = re.compile(
-    r"\bmy name(?:'s| is)\s+([A-Z][a-zA-Z]+)", re.IGNORECASE
+    r"\bmy name(?:'s| is)\s+([A-Z][a-zA-Z'-]+(?:\s+[A-Z][a-zA-Z'-]+){0,2})",
+    re.IGNORECASE,
 )
 
 
 def _extract_first_person_name(story_text: str) -> Optional[str]:
-    """Pull the invented character's first name out of a first-person
-    story's self-introduction (e.g. 'Hi, my name is Priya...'), per
-    prompts/video_story_dual_system.txt's required story structure. Used to
-    auto-name saved Video Script + Story pairs when the user doesn't type
-    one."""
+    """Pull the invented character's full name out of a first-person
+    story's self-introduction (e.g. 'Hi, my name is Maria Rodriguez...'),
+    per prompts/video_story_dual_system.txt's required story structure.
+    Captures up to three consecutive capitalized words so multi-word names
+    survive, not just the first token. Used to auto-name saved Video
+    Script + Story pairs when the user doesn't type one."""
     match = _FIRST_PERSON_NAME_PATTERN.search(story_text)
     if not match:
         return None
-    name = match.group(1).strip()
+    name = match.group(1).strip().rstrip(",.!?")
     return name or None
 
 
@@ -1421,15 +1423,14 @@ def generate_video_story(req: VideoStoryRequest):
         )
 
     try:
-        video_script, story = presentation_llm.generate_video_and_story(
+        video_script, story, seed_character_name = presentation_llm.generate_video_and_story(
             req.learning_objectives or "", all_chunks
         )
     except Exception as exc:
         raise HTTPException(500, f"Something went wrong while generating the video script and story: {exc}")
 
     custom_name = (req.name or "").strip()
-    story_name = _extract_first_person_name(story)
-    label = custom_name or story_name or f"Video Story {len(_list_saved_dual_scripts()) + 1}"
+    label = custom_name or seed_character_name or f"Video Story {len(_list_saved_dual_scripts()) + 1}"
     video_path, story_path = save_dual_script(video_script, story, label)
 
     entry = {
