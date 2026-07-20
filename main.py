@@ -25,7 +25,7 @@ from datetime import datetime
 from functools import lru_cache
 from typing import List, Optional, Tuple
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -309,11 +309,26 @@ def resolve_filename(name: str, pdf_folder: str):
     return resolve_pdf_reference(name, candidates)
 
 
+def _tag_folder(chunks: Optional[List[Chunk]], folder: str) -> Optional[List[Chunk]]:
+    """Stamp every chunk's metadata with the S3 knowledge-repository folder
+    it was ingested from (e.g. "video_scripts", "company_policies").
+    QdrantService.upsert_chunks() promotes chunk.metadata["folder"] to a
+    top-level, filterable payload field. A blank/None folder is a no-op,
+    so ingestion without a folder behaves exactly as before."""
+    if not chunks or not folder:
+        return chunks
+    for chunk in chunks:
+        chunk.metadata = dict(chunk.metadata or {})
+        chunk.metadata["folder"] = folder
+    return chunks
+
+
 def parse_and_chunk(
     file_path: str,
     embedding_service: EmbeddingService,
     parser=None,
     use_semantic_chunking: bool = True,
+    folder: str = "",
 ):
     parser = parser or PDFParser(pdf_folder=settings.PDF_FOLDER)
     pages = parser.extract_pages(file_path)
@@ -321,7 +336,7 @@ def parse_and_chunk(
         return None
 
     if isinstance(parser, ExcelParser):
-        return [
+        chunks = [
             Chunk(
                 chunk_id=str(uuid.uuid4()),
                 text=page.text,
@@ -336,6 +351,7 @@ def parse_and_chunk(
             for page in pages
             if page.text and page.text.strip()
         ] or None
+        return _tag_folder(chunks, folder)
 
     document_chunker = DocumentChunker(
         heading_max_length=settings.DOC_CHUNK_HEADING_MAX_LENGTH,
@@ -346,7 +362,7 @@ def parse_and_chunk(
         return None
 
     if not use_semantic_chunking:
-        return [
+        chunks = [
             Chunk(
                 chunk_id=str(uuid.uuid4()),
                 text=dc.text,
@@ -360,6 +376,7 @@ def parse_and_chunk(
             )
             for dc in document_chunks
         ]
+        return _tag_folder(chunks, folder)
 
     semantic_chunker = SemanticChunkingService(
         embeddings=embedding_service.langchain_embeddings,
@@ -370,7 +387,7 @@ def parse_and_chunk(
         chunk_overlap=settings.CHUNK_OVERLAP,
     )
     chunks = semantic_chunker.chunk_documents(document_chunks)
-    return chunks or None
+    return _tag_folder(chunks or None, folder)
 
 
 def _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service) -> None:
@@ -394,9 +411,9 @@ def _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service) -> N
         qdrant_service.upsert_chunks(batch, embeddings)
 
 
-def ingest_single_pdf(file_path: str, embedding_service, qdrant_service) -> int:
+def ingest_single_pdf(file_path: str, embedding_service, qdrant_service, folder: str = "") -> int:
     parser = PDFParser(pdf_folder=settings.PDF_FOLDER)
-    chunks = parse_and_chunk(file_path, embedding_service, parser=parser)
+    chunks = parse_and_chunk(file_path, embedding_service, parser=parser, folder=folder)
     if not chunks:
         return 0
 
@@ -422,54 +439,54 @@ def ingest_single_pdf(file_path: str, embedding_service, qdrant_service) -> int:
     return len(chunks)
 
 
-def ingest_single_docx(file_path: str, embedding_service, qdrant_service) -> int:
+def ingest_single_docx(file_path: str, embedding_service, qdrant_service, folder: str = "") -> int:
     parser = DocxParser(docx_folder=settings.PDF_FOLDER)
-    chunks = parse_and_chunk(file_path, embedding_service, parser=parser)
+    chunks = parse_and_chunk(file_path, embedding_service, parser=parser, folder=folder)
     if not chunks:
         return 0
     _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service)
     return len(chunks)
 
 
-def ingest_single_excel(file_path: str, embedding_service, qdrant_service, restructure_llm=None) -> int:
+def ingest_single_excel(file_path: str, embedding_service, qdrant_service, restructure_llm=None, folder: str = "") -> int:
     parser = ExcelParser(excel_folder=settings.PDF_FOLDER, llm_service=restructure_llm)
-    chunks = parse_and_chunk(file_path, embedding_service, parser=parser, use_semantic_chunking=False)
+    chunks = parse_and_chunk(file_path, embedding_service, parser=parser, use_semantic_chunking=False, folder=folder)
     if not chunks:
         return 0
     _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service)
     return len(chunks)
 
 
-def ingest_single_pptx(file_path: str, embedding_service, qdrant_service) -> int:
+def ingest_single_pptx(file_path: str, embedding_service, qdrant_service, folder: str = "") -> int:
     parser = PptxParser(pptx_folder=settings.PDF_FOLDER)
-    chunks = parse_and_chunk(file_path, embedding_service, parser=parser)
+    chunks = parse_and_chunk(file_path, embedding_service, parser=parser, folder=folder)
     if not chunks:
         return 0
     _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service)
     return len(chunks)
 
 
-def ingest_single_image(file_path: str, embedding_service, qdrant_service) -> int:
+def ingest_single_image(file_path: str, embedding_service, qdrant_service, folder: str = "") -> int:
     parser = ImageParser(image_folder=settings.PDF_FOLDER)
-    chunks = parse_and_chunk(file_path, embedding_service, parser=parser)
+    chunks = parse_and_chunk(file_path, embedding_service, parser=parser, folder=folder)
     if not chunks:
         return 0
     _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service)
     return len(chunks)
 
 
-def ingest_document_by_extension(dest_path: str, embedding_service, qdrant_service) -> int:
+def ingest_document_by_extension(dest_path: str, embedding_service, qdrant_service, folder: str = "") -> int:
     file_ext = os.path.splitext(dest_path)[1].lower()
     if file_ext == ".docx":
-        return ingest_single_docx(dest_path, embedding_service, qdrant_service)
+        return ingest_single_docx(dest_path, embedding_service, qdrant_service, folder=folder)
     elif file_ext in (".xlsx", ".xlsm", ".xls", ".csv"):
-        return ingest_single_excel(dest_path, embedding_service, qdrant_service)
+        return ingest_single_excel(dest_path, embedding_service, qdrant_service, folder=folder)
     elif file_ext == ".pptx":
-        return ingest_single_pptx(dest_path, embedding_service, qdrant_service)
+        return ingest_single_pptx(dest_path, embedding_service, qdrant_service, folder=folder)
     elif file_ext in IMAGE_EXTENSIONS:
-        return ingest_single_image(dest_path, embedding_service, qdrant_service)
+        return ingest_single_image(dest_path, embedding_service, qdrant_service, folder=folder)
     elif file_ext == ".pdf":
-        return ingest_single_pdf(dest_path, embedding_service, qdrant_service)
+        return ingest_single_pdf(dest_path, embedding_service, qdrant_service, folder=folder)
     else:
         logger.warning("Skipping '%s': unsupported extension '%s'.", dest_path, file_ext)
         return 0
@@ -832,6 +849,7 @@ def generate_learning_feed_item(
     monthly_topic_content: Optional[str] = None,
     common_data: Optional[str] = None,
     web_results: Optional[str] = None,
+    folders: Optional[List[str]] = None,
 ) -> dict:
     """End-to-end Learning Content Generation Engine pipeline for one feed
     item:
@@ -869,7 +887,7 @@ def generate_learning_feed_item(
         )
 
     try:
-        chunks = retriever.retrieve(topic)
+        chunks = retriever.retrieve(topic, folders=folders)
     except Exception as exc:
         logger.error("Retrieval failed during content generation: %s", exc)
         raise RuntimeError("An error occurred while retrieving relevant information.") from exc
@@ -1081,6 +1099,15 @@ class ContentGenRequest(BaseModel):
     monthly_topic_content: Optional[str] = None
     common_data: Optional[str] = None
     web_results: Optional[str] = None
+    # Folder-based retrieval (see prompts.txt "FOLDER SELECTION LOGIC"):
+    #   omitted/None -> auto-detect from `topic` text (e.g. "... from the
+    #     video_scripts folder"), falling back to global search if no
+    #     folder is named.
+    #   [] (empty list) -> force global search across every folder, even
+    #     if `topic` happens to mention a folder name.
+    #   ["video_scripts"] -> folder-specific retrieval.
+    #   ["video_scripts", "incident_reports"] -> multi-folder retrieval.
+    folders: Optional[List[str]] = None
 
 
 class ContentGenResponse(BaseModel):
@@ -1090,6 +1117,28 @@ class ContentGenResponse(BaseModel):
     image_prompt: str
     image_base64: str
     saved_path: str
+
+
+class DailyTipRequest(BaseModel):
+    # Both optional: "give me today's daily tip" needs neither.
+    topic: Optional[str] = None
+    common_data: Optional[str] = None
+    web_results: Optional[str] = None
+    # How many distinct tips to generate (e.g. 10 for "give me 10 daily
+    # tips"). Defaults to 1.
+    count: int = 1
+    # Folder scope (see ContentGenRequest.folders for the same semantics):
+    #   None -> auto-detect from `topic` text (e.g. "... from the
+    #     video_scripts folder"), falling back to global if none named.
+    #   [] -> force global even if `topic` names a folder.
+    #   ["video_scripts"] -> scope to just that folder.
+    folders: Optional[List[str]] = None
+
+
+class DailyTipResponse(BaseModel):
+    topic: str
+    tips: List[str]
+    word_counts: List[int]
 
 
 @app.on_event("startup")
@@ -1122,7 +1171,13 @@ def list_documents():
 
 
 @app.post("/api/documents/upload")
-async def upload_document(file: UploadFile = File(...)):
+async def upload_document(file: UploadFile = File(...), folder: str = Form("")):
+    """folder: which S3 knowledge-repository category this document
+    belongs to (e.g. "video_scripts", "company_policies",
+    "incident_reports") -- whatever folders you actually have. Optional;
+    an empty/omitted folder just means the document isn't scoped to any
+    folder for retrieval (it still shows up in global searches)."""
+    folder = folder.strip()
     original_filename = os.path.basename(file.filename)
     ext = os.path.splitext(original_filename)[1].lower()
     if ext not in SUPPORTED_EXTENSIONS:
@@ -1163,7 +1218,7 @@ async def upload_document(file: UploadFile = File(...)):
         }
 
     try:
-        n_chunks = ingest_document_by_extension(dest_path, embedding_service, qdrant_service)
+        n_chunks = ingest_document_by_extension(dest_path, embedding_service, qdrant_service, folder=folder)
     except Exception as exc:
         raise HTTPException(500, f"Something went wrong while processing the document: {exc}")
 
@@ -1618,6 +1673,7 @@ def generate_content(req: ContentGenRequest):
             monthly_topic_content=req.monthly_topic_content,
             common_data=req.common_data,
             web_results=req.web_results,
+            folders=req.folders,
         )
     except ValueError as exc:
         raise HTTPException(404, str(exc))
@@ -1628,6 +1684,71 @@ def generate_content(req: ContentGenRequest):
         raise HTTPException(500, "An error occurred while generating the content.")
 
     return ContentGenResponse(**result)
+
+
+@app.get("/api/folders")
+def list_folders():
+    """Every folder currently indexed in Qdrant (e.g. "video_scripts",
+    "company_policies") -- nothing hardcoded, this reflects whatever
+    you've actually ingested, however many folders that is."""
+    return {"folders": get_qdrant_service().list_folders()}
+
+
+@app.post("/api/daily-tip", response_model=DailyTipResponse)
+def daily_tip(req: DailyTipRequest):
+    """Daily Tip: one or more 40-80 word practical tips.
+
+    Folder scope: if req.folders is given, used as-is. Otherwise, folder
+    names mentioned in req.topic (e.g. "10 daily tips from the
+    video_scripts folder") are auto-detected against whatever's actually
+    indexed; if none are found, retrieval is global across every folder
+    (no dedicated daily_tips folder needed).
+
+    req.count controls how many distinct tips come back (default 1).
+    """
+    retriever = get_retriever()
+    content_llm = get_content_llm()
+    topic = (req.topic or "").strip()
+    count = max(1, min(req.count, 25))  # sane upper bound on one request
+
+    folders = req.folders
+    if folders is None and topic:
+        known_folders = get_qdrant_service().list_folders()
+        folders = retriever.extract_folder_hints(topic, known_folders) or None
+
+    try:
+        chunks = retriever.retrieve_for_daily_tip(topic, folders=folders)
+    except Exception as exc:
+        logger.error("Retrieval failed during daily tip generation: %s", exc)
+        raise HTTPException(500, "An error occurred while retrieving relevant information.")
+
+    if not chunks:
+        scope_note = f" in folder(s) {', '.join(folders)}" if folders else ""
+        raise HTTPException(
+            404,
+            f"No indexed content was found{scope_note} to generate a daily tip from. "
+            "Upload and process documents first.",
+        )
+
+    try:
+        tips = content_llm.generate_daily_tips(
+            chunks,
+            topic=topic,
+            count=count,
+            common_data=req.common_data,
+            web_results=req.web_results,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc))
+    except Exception as exc:
+        logger.error("Daily tip generation failed: %s", exc)
+        raise HTTPException(500, "An error occurred while generating the daily tip(s).")
+
+    return DailyTipResponse(
+        topic=topic or "today's safety learning",
+        tips=tips,
+        word_counts=[len(t.split()) for t in tips],
+    )
 
 
 # ---------------------------------------------------------------------------

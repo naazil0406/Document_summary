@@ -77,6 +77,13 @@ class QdrantService:
                     "toc_section": chunk.toc_section or (chunk.metadata or {}).get(
                         "toc_section", ""
                     ),
+                    # folder/subfolder are the S3 "knowledge repository" category
+                    # (e.g. "video_scripts", "company_policies") a document was
+                    # ingested from. Promoted to the top level (like toc_section)
+                    # so Qdrant can filter on them directly instead of having to
+                    # unpack the nested metadata dict on every query.
+                    "folder": (chunk.metadata or {}).get("folder", ""),
+                    "subfolder": (chunk.metadata or {}).get("subfolder", ""),
                     "metadata": chunk.metadata or {},
                 },
             )
@@ -164,12 +171,40 @@ class QdrantService:
             logger.error("Failed to upsert TOC points into Qdrant: %s", exc)
             raise
 
-    def search(self, query_vector: List[float], top_k: int = settings.TOP_K) -> List[dict]:
-        """Find the top_k most similar chunks to the given query vector."""
+    def search(
+        self,
+        query_vector: List[float],
+        top_k: int = settings.TOP_K,
+        folders: Optional[List[str]] = None,
+    ) -> List[dict]:
+        """Find the top_k most similar chunks to the given query vector.
+
+        folders:
+          - None / empty -> global search, no folder restriction.
+          - ["video_scripts"] -> folder-specific retrieval.
+          - ["video_scripts", "incident_reports"] -> multi-folder retrieval
+            (matches ANY of the listed folders — an OR, not an AND).
+
+        TOC points (type == "toc") are excluded here so folder filtering
+        only ever narrows real content chunks, matching the exclusion
+        already applied in retrieve_section()/retrieve_document().
+        """
+        query_filter = None
+        if folders:
+            query_filter = qdrant_models.Filter(
+                must=[
+                    qdrant_models.FieldCondition(
+                        key="folder",
+                        match=qdrant_models.MatchAny(any=folders),
+                    )
+                ]
+            )
+
         try:
             results = self.client.query_points(
                 collection_name=self.collection_name,
                 query=query_vector,
+                query_filter=query_filter,
                 limit=top_k,
                 with_payload=True,
             ).points
@@ -190,10 +225,49 @@ class QdrantService:
                     "page_label": payload.get("page_label", "N/A"),
                     "chunk_id": payload.get("chunk_id", ""),
                     "toc_section": payload.get("toc_section", ""),
+                    "folder": payload.get("folder", ""),
+                    "subfolder": payload.get("subfolder", ""),
                     "metadata": payload.get("metadata", {}),
                 }
             )
         return hits
+
+    def list_folders(self) -> List[str]:
+        """Return every distinct non-empty `folder` value currently indexed.
+
+        Used by the retriever to know which folder names it should try to
+        match against user queries, without hardcoding a folder list
+        anywhere — whatever you've actually ingested is what gets searched.
+        """
+        folders: set = set()
+        offset = None
+        try:
+            while True:
+                batch, offset = self.client.scroll(
+                    collection_name=self.collection_name,
+                    scroll_filter=qdrant_models.Filter(
+                        must_not=[
+                            qdrant_models.FieldCondition(
+                                key="type",
+                                match=qdrant_models.MatchValue(value="toc"),
+                            )
+                        ]
+                    ),
+                    limit=256,
+                    offset=offset,
+                    with_payload=["folder"],
+                    with_vectors=False,
+                )
+                for record in batch:
+                    folder = (record.payload or {}).get("folder", "")
+                    if folder:
+                        folders.add(folder)
+                if offset is None:
+                    break
+        except Exception as exc:
+            logger.warning("Could not list indexed folders: %s", exc)
+            return []
+        return sorted(folders)
 
     def search_toc(
         self,

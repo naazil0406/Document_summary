@@ -772,137 +772,6 @@ button { font-family: inherit; cursor: pointer; }
 }
 
 /* ============================================================
-   Image panel
-   ============================================================ */
-#panel-image.panel.is-active {
-  display: grid;
-  grid-template-columns: 1fr 300px;
-  gap: 32px;
-  max-width: 1040px;
-  align-items: start;
-}
-#panel-image .panel-head { grid-column: 1 / -1; margin-bottom: 0; }
-#panel-image .image-main { min-width: 0; }
-
-@media (max-width: 860px) {
-  #panel-image.panel.is-active { grid-template-columns: 1fr; }
-}
-
-.image-composer {
-  display: flex;
-  gap: 10px;
-  margin-bottom: 20px;
-}
-.image-composer input {
-  flex: 1;
-  background: var(--paper-raised);
-  border: 1px solid var(--paper-rule);
-  border-radius: 8px;
-  padding: 10px 14px;
-  font-family: var(--font-body);
-  font-size: 14px;
-  color: var(--ink);
-}
-.image-composer input:focus { outline: none; border-color: var(--gold); }
-
-.image-empty {
-  border: 1px dashed var(--paper-rule);
-  border-radius: var(--radius);
-  padding: 30px 24px;
-  text-align: center;
-}
-
-.image-card {
-  background: var(--paper-raised);
-  border: 1px solid var(--paper-rule);
-  border-radius: var(--radius);
-  padding: 18px 20px;
-}
-.image-card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
-.image-card-tag {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--gold-deep);
-  background: rgba(184,134,43,0.12);
-  padding: 2px 7px;
-  border-radius: 4px;
-}
-.image-card-picture {
-  width: 100%;
-  border-radius: 8px;
-  border: 1px solid var(--paper-rule);
-  display: block;
-  margin-bottom: 14px;
-}
-.image-card-prompt {
-  font-family: var(--font-body);
-  font-size: 13px;
-  line-height: 1.6;
-  color: var(--ink-text-soft);
-  white-space: pre-wrap;
-  margin: 0;
-  max-height: 30vh;
-  overflow-y: auto;
-}
-
-.image-rail {
-  border-left: 1px solid var(--paper-rule);
-  padding-left: 24px;
-}
-.image-rail-title {
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--ink-text-soft);
-  margin-bottom: 12px;
-}
-.image-rail-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  max-height: 70vh;
-  overflow-y: auto;
-}
-.image-rail-empty {
-  font-size: 13px;
-  color: var(--ink-text-soft);
-}
-.image-rail-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  text-align: left;
-  background: var(--paper-raised);
-  border: 1px solid var(--paper-rule);
-  border-radius: 8px;
-  padding: 8px 10px;
-  cursor: pointer;
-}
-.image-rail-item:hover { border-color: var(--slate); }
-.image-rail-item.is-active {
-  border-color: var(--gold);
-  background: rgba(184,134,43,0.08);
-}
-.image-rail-item-thumb {
-  width: 36px;
-  height: 36px;
-  border-radius: 6px;
-  object-fit: cover;
-  flex-shrink: 0;
-}
-.image-rail-item-label {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--ink);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* ============================================================
    Learning Feed (content generation) panel
    ============================================================ */
 #panel-content.panel.is-active {
@@ -1096,9 +965,6 @@ button { font-family: inherit; cursor: pointer; }
       <button class="rail-nav-item" data-panel="videostory">
         <span class="rail-nav-dot"></span>Video Script &amp; Story
       </button>
-      <button class="rail-nav-item" data-panel="image">
-        <span class="rail-nav-dot"></span>Image
-      </button>
       <button class="rail-nav-item" data-panel="content">
         <span class="rail-nav-dot"></span>Learning Feed
       </button>
@@ -1208,6 +1074,12 @@ button { font-family: inherit; cursor: pointer; }
         <h1>Generate a video script &amp; story</h1>
         <p>It picks its own topic from your Knowledge Base and generates a cinematic narration video script and a realistic first-person incident story together — both telling the same story from two angles. Click Script or Story to switch views.</p>
         <form class="vs-composer" id="vsComposerForm">
+          <input
+            type="text"
+            id="vsHintInput"
+            class="vs-composer-input"
+            placeholder="Optional: describe the workplace/scenario in one line (e.g. a forklift near-miss in a cold-storage warehouse)"
+          />
           <button type="submit" class="primary-btn" id="generateVsBtn">Generate</button>
         </form>
       </header>
@@ -1244,41 +1116,6 @@ button { font-family: inherit; cursor: pointer; }
         <div class="vs-rail-title">Generated pairs</div>
         <div class="vs-rail-list" id="vsList">
           <div class="vs-rail-empty">Nothing generated yet.</div>
-        </div>
-      </aside>
-    </section>
-
-    <!-- ---------- IMAGE PANEL ---------- -->
-    <section class="panel" id="panel-image">
-      <header class="panel-head">
-        <h1>Generate an image from your documents</h1>
-        <p>Describe what you want to see. Retrieved context from your indexed documents is turned into one optimized prompt (Nova Lite), then rendered into an image (Nova Canvas).</p>
-      </header>
-
-      <div class="image-main">
-        <form class="image-composer" id="imageComposerForm">
-          <input type="text" id="imageComposerInput" placeholder="e.g. the safety inspection checklist for the warehouse…" autocomplete="off" />
-          <button type="submit" class="primary-btn" id="generateImageBtn">Generate</button>
-        </form>
-
-        <div class="image-empty" id="imageEmpty">
-          <p>No image generated yet this session.</p>
-        </div>
-
-        <article class="image-card" id="imageCard" hidden>
-          <div class="image-card-head">
-            <span class="image-card-tag" id="imageCardTag">Image</span>
-            <a href="#" class="ghost-btn" id="imageDownload">Download .png</a>
-          </div>
-          <img class="image-card-picture" id="imagePicture" alt="Generated image" />
-          <p class="image-card-prompt" id="imagePromptText"></p>
-        </article>
-      </div>
-
-      <aside class="image-rail">
-        <div class="image-rail-title">Generated images</div>
-        <div class="image-rail-list" id="imageList">
-          <div class="image-rail-empty">Nothing generated yet.</div>
         </div>
       </aside>
     </section>
@@ -1374,9 +1211,6 @@ button { font-family: inherit; cursor: pointer; }
   const summaryCard = document.getElementById("summaryCard");
   const uploadLog = document.getElementById("uploadLog");
   const syncLog = document.getElementById("syncLog");
-  const imageList = document.getElementById("imageList");
-  const imageEmpty = document.getElementById("imageEmpty");
-  const imageCard = document.getElementById("imageCard");
 
   function addMsg(role, text) {
     threadEmpty.style.display = "none";
@@ -1707,6 +1541,9 @@ button { font-family: inherit; cursor: pointer; }
     e.preventDefault();
     const learning_objectives = "";
     const name = null;
+    // Optional — leave blank and the backend invents its own workplace
+    // and scenario, exactly like before this change.
+    const hint = document.getElementById("vsHintInput").value.trim();
 
     const btn = document.getElementById("generateVsBtn");
     btn.disabled = true;
@@ -1715,7 +1552,11 @@ button { font-family: inherit; cursor: pointer; }
       const entry = await api("/api/video-story", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ learning_objectives, name: name || null }),
+        body: JSON.stringify({
+          learning_objectives,
+          name: name || null,
+          hint: hint || null,
+        }),
       });
       await refreshVsList();
       renderVs(entry);
@@ -1728,89 +1569,6 @@ button { font-family: inherit; cursor: pointer; }
   });
 
   refreshVsList();
-
-  // ---- Image generation (session-only history; not persisted server-side) ----
-  const generatedImages = []; // {id, label, imageBase64, imagePrompt, createdAt}
-  let activeImageId = null;
-
-  function renderImage(entry) {
-    activeImageId = entry.id;
-    imageEmpty.hidden = true;
-    imageCard.hidden = false;
-    document.getElementById("imageCardTag").textContent = entry.label;
-    const pic = document.getElementById("imagePicture");
-    pic.src = `data:image/png;base64,${entry.imageBase64}`;
-    document.getElementById("imagePromptText").textContent = entry.imagePrompt;
-
-    const dl = document.getElementById("imageDownload");
-    dl.href = pic.src;
-    dl.download = `${entry.label.replace(/\s+/g, "_").slice(0, 40)}.png`;
-
-    document.querySelectorAll(".image-rail-item").forEach((el) => {
-      el.classList.toggle("is-active", el.dataset.id === entry.id);
-    });
-  }
-
-  function renderImageList() {
-    if (!generatedImages.length) {
-      imageList.innerHTML = `<div class="image-rail-empty">Nothing generated yet.</div>`;
-      return;
-    }
-    imageList.innerHTML = generatedImages
-      .slice()
-      .reverse()
-      .map(
-        (img) => `
-          <button class="image-rail-item${img.id === activeImageId ? " is-active" : ""}" data-id="${img.id}">
-            <img class="image-rail-item-thumb" src="data:image/png;base64,${img.imageBase64}" alt="" />
-            <div class="image-rail-item-label">${escapeHtml(img.label)}</div>
-          </button>`
-      )
-      .join("");
-
-    imageList.querySelectorAll(".image-rail-item").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const entry = generatedImages.find((img) => img.id === btn.dataset.id);
-        if (entry) renderImage(entry);
-      });
-    });
-  }
-
-  document.getElementById("imageComposerForm").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const input = document.getElementById("imageComposerInput");
-    const query = input.value.trim();
-    if (!query) return;
-
-    const btn = document.getElementById("generateImageBtn");
-    btn.disabled = true;
-    btn.textContent = "Generating…";
-    try {
-      const result = await api("/api/generate-image", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query }),
-      });
-      const entry = {
-        id: `${Date.now()}`,
-        label: query,
-        imageBase64: result.image_base64,
-        imagePrompt: result.image_prompt,
-        createdAt: new Date().toISOString(),
-      };
-      generatedImages.push(entry);
-      renderImageList();
-      renderImage(entry);
-      input.value = "";
-    } catch (exc) {
-      alert("Could not generate image: " + exc.message);
-    } finally {
-      btn.disabled = false;
-      btn.textContent = "Generate";
-    }
-  });
-
-  renderImageList();
 
   // ---- Learning Feed / content generation (session-only history) ----
   const generatedContent = []; // {id, contentType, topic, contentText, imagePrompt, imageBase64, createdAt}

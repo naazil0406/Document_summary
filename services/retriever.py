@@ -61,6 +61,12 @@ SUMMARY_KEYWORDS = {
 TOC_MATCH_THRESHOLD = 0.80
 
 
+def _normalize_folder_name(name: str) -> str:
+    """"video_scripts" / "Video Scripts" / "video scripts" all normalize
+    to the same comparable form."""
+    return re.sub(r"[\s_-]+", "_", name.strip().lower())
+
+
 class Retriever:
     """Retrieves the most relevant chunks for a given user query."""
 
@@ -130,6 +136,33 @@ class Retriever:
             # normalise spacing so "unit2" → "unit 2"
             return re.sub(r"(unit|chapter|section)\s*(\d+)", r"\1 \2", raw).strip()
         return ""
+
+    def _extract_folder_hints(self, query: str, known_folders: List[str]) -> List[str]:
+        """Return every known folder name mentioned in the query.
+
+        Matching is done by normalizing both the query and each known
+        folder name (spaces/hyphens/underscores collapsed, lowercased) so
+        "video scripts", "Video-Scripts", and "video_scripts" all match
+        the folder actually stored as "video_scripts". known_folders is
+        whatever QdrantService.list_folders() returns — nothing is
+        hardcoded, so this works with however many folders you actually
+        have ingested.
+        """
+        if not known_folders:
+            return []
+        normalized_query = _normalize_folder_name(query)
+        hits = []
+        for folder in known_folders:
+            normalized_folder = _normalize_folder_name(folder)
+            if normalized_folder and normalized_folder in normalized_query:
+                hits.append(folder)
+        return hits
+
+    def extract_folder_hints(self, query: str, known_folders: List[str]) -> List[str]:
+        """Public wrapper around _extract_folder_hints, for callers outside
+        this class (e.g. main.py's daily-tip endpoint) that want to
+        auto-detect folder names mentioned in a query."""
+        return self._extract_folder_hints(query, known_folders)
 
     def extract_unit_hint(self, query: str) -> str:
         """Public wrapper around _extract_unit_hint, for callers outside this
@@ -217,10 +250,64 @@ class Retriever:
 
     # ── Main retrieval ────────────────────────────────────────────────────────
 
-    def retrieve(self, query: str) -> List[dict]:
-        """Embed the query and return the most relevant chunks above MIN_RELEVANCE_SCORE."""
+    def retrieve_for_daily_tip(
+        self,
+        topic: str = "",
+        top_k: Optional[int] = None,
+        folders: Optional[List[str]] = None,
+    ) -> List[dict]:
+        """Retrieval for the Daily Tip feature.
+
+        By default (folders=None) there's no dedicated `daily_tips`
+        folder, so this searches globally across every indexed folder and
+        lets semantic relevance decide what comes back — video_scripts
+        naturally tends to surface often since it's usually the richest
+        narrative/example-driven content, but nothing here special-cases
+        it structurally.
+
+        folders can still be set explicitly (e.g. "give me 10 daily tips
+        from the video_scripts folder") to scope to one or more specific
+        folders instead — same folders semantics as Retriever.retrieve():
+        an explicit list is used as-is, [] forces global.
+
+        topic="" (no specific topic given, e.g. "give me today's daily
+        tip") falls back to a broad safety/best-practice query so
+        retrieval still returns something relevant instead of failing on
+        an empty query.
+        """
+        query = topic.strip() if topic and topic.strip() else (
+            "workplace safety best practices lessons learned"
+        )
+        top_k = top_k or self.summary_top_k
+        query_vector = self.embedding_service.embed_query(self._normalize_query(query))
+        results = self.qdrant_service.search(query_vector, top_k=top_k, folders=folders or None)
+        results = [r for r in results if r.get("text", "").strip()]
+        filtered = [r for r in results if r.get("score", 0.0) >= self.min_relevance_score]
+        return filtered or results
+
+    def retrieve(
+        self,
+        query: str,
+        folders: Optional[List[str]] = None,
+    ) -> List[dict]:
+        """Embed the query and return the most relevant chunks above MIN_RELEVANCE_SCORE.
+
+        folders:
+          - Explicit list (e.g. from an API request / UI folder picker) ->
+            folder-specific or multi-folder retrieval, used as-is.
+          - None -> auto-detect: if the query text names one or more
+            currently-indexed folders (e.g. "...from the video_scripts
+            folder"), scope to those. Otherwise falls through to global
+            retrieval across everything indexed.
+          - Pass folders=[] explicitly to force global retrieval even if
+            the query text happens to mention a folder name.
+        """
         if not query or not query.strip():
             raise ValueError("Query must not be empty.")
+
+        if folders is None:
+            known_folders = self.qdrant_service.list_folders()
+            folders = self._extract_folder_hints(query, known_folders)
 
         normalized_query = self._normalize_query(query)
         retrieval_query = self._rewrite_query_for_retrieval(normalized_query)
@@ -236,15 +323,21 @@ class Retriever:
         unit_hint = self._extract_unit_hint(query)
 
         logger.info(
-            "Query intent: %s | top_k=%d | unit_hint=%r",
+            "Query intent: %s | top_k=%d | unit_hint=%r | folders=%s",
             "SUMMARY" if self._is_summary_query(query) else "Q&A",
             top_k,
             unit_hint or "none",
+            folders or "ALL (global)",
         )
 
+        # The fast TOC-lookup path has no folder awareness (TOC entries
+        # aren't tagged with a folder), so when a folder scope is active we
+        # skip straight to folder-filtered semantic search instead of
+        # risking a TOC match that lives outside the requested folder(s).
         # Summary requests retain the existing summary retrieval behavior.
-        # For Q&A, TOC lookup gets first refusal before semantic retrieval.
-        if not self._is_summary_query(query):
+        # For Q&A with no folder scope, TOC lookup gets first refusal
+        # before semantic retrieval.
+        if not folders and not self._is_summary_query(query):
             logger.info("Searching TOC...")
             try:
                 toc_results = self.qdrant_service.search_toc(query_vector, top_k=10)
@@ -322,9 +415,12 @@ class Retriever:
             else:
                 logger.info("No TOC match.\n\nUsing semantic retrieval.")
         else:
-            logger.info("Summary query detected. Skipping TOC search.")
+            logger.info(
+                "Skipping TOC search (%s).",
+                "summary query" if self._is_summary_query(query) else "folder-scoped retrieval",
+            )
 
-        results = self.qdrant_service.search(query_vector, top_k=top_k)
+        results = self.qdrant_service.search(query_vector, top_k=top_k, folders=folders or None)
         # TOC points intentionally share the collection but are navigation
         # records, not answer context. Existing chunks always contain text.
         results = [result for result in results if result.get("text", "").strip()]

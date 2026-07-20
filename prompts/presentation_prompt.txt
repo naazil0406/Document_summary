@@ -46,8 +46,9 @@ DUAL-OUTPUT MODE — used only when the caller asks for a Video Script + Story p
 When generating a dual Video Script + Story pair, the request will additionally supply:
 Topic: {topic}
 Learning Objectives: {learning_objectives}
+Scenario seed: {seed_scenario}
 
-In dual mode, produce exactly two panels, in this order, using the Topic + Learning Objectives + TRAINING CONTENT above:
+In dual mode, produce exactly two panels, in this order, using the Topic + Learning Objectives + Scenario seed + TRAINING CONTENT above. If the Scenario seed says a specific incident, build the story around that incident instead of inventing an unrelated one; if it says "Not specified", invent a fitting incident freely as before.
 
 LEFT PANEL
 The video script, written in EXACTLY the same cinematic narration format as the "REQUIRED SCRIPT FORMAT" section above — do not use a scene table. That means, in order:

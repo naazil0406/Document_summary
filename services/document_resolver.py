@@ -62,6 +62,14 @@ _DOC_EXTENSIONS = (
 _UNIQUE_ID_PATTERN = re.compile(r"\b(\d{6})\b")
 _PART_PATTERN = re.compile(r"\bpart\s*0*(\d+)\b", re.IGNORECASE)
 
+# Mirrors canonical_naming._LABEL_WORDS: words that typically act as a
+# labeling/numbering scheme (Unit 4, Part 2, ...). canonical_filename()
+# merges these onto an adjacent number when building the short label
+# (e.g. "Unit 4" -> "Unit4"), so a reference has to be merged the same
+# way here or "unit"/"4" as separate tokens will never line up with the
+# single "unit4" token stored in the canonical name.
+_LABEL_WORDS = {"unit", "part", "module", "chapter", "section", "lesson", "week", "day", "vol", "volume"}
+
 
 def _words(value: str) -> list[str]:
     value = re.sub(
@@ -69,7 +77,18 @@ def _words(value: str) -> list[str]:
         " ",
         value.lower(),
     )
-    return re.findall(r"[a-z0-9]+", value)
+    tokens = re.findall(r"[a-z0-9]+", value)
+
+    # Add a merged "unit4"-style token wherever a label word is
+    # immediately followed by a bare number, without discarding the
+    # original separate tokens (so exact phrase/compact comparisons
+    # elsewhere still see the untouched word sequence too).
+    merged = []
+    for i, token in enumerate(tokens):
+        merged.append(token)
+        if token in _LABEL_WORDS and i + 1 < len(tokens) and tokens[i + 1].isdigit():
+            merged.append(token + tokens[i + 1])
+    return merged
 
 
 def _compact(value: str) -> str:
@@ -129,6 +148,17 @@ def _legacy_fuzzy_match(reference: str, reference_words: list[str], filenames: L
             score = 650 + len(reference_compact)
         elif all(word in stem_words for word in reference_words):
             score = 500 + sum(len(word) for word in reference_words)
+        else:
+            # Canonical labels are shortened to a single keyword (e.g. the
+            # original "CERT 2.0_Unit 4 Master Sheet" becomes just
+            # "Unit4"), so a query word like "mastersheet" can be lost
+            # entirely even for the obviously-correct file. Give partial
+            # credit for whatever words DO overlap, so a query still
+            # resolves as long as no other candidate matches as well or
+            # better (handled by the tie-break below).
+            overlap_words = [word for word in reference_words if word in stem_words]
+            if overlap_words:
+                score = 200 + sum(len(word) for word in overlap_words)
 
         if not score:
             continue

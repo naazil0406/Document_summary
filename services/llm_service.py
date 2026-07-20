@@ -137,7 +137,25 @@ CONTENT_TYPES = [
     "Fun Fact",
     "Reflection Question",
     "Safety / Best Practice Tip",
+    "Daily Tip",
 ]
+
+# Daily Tip has its own word-count contract (40-80 words), distinct from
+# the 50-80/100-word ceiling every other Content Type follows — see
+# prompts/content_generation_system.txt's Daily Tip section.
+_DAILY_TIP_MIN_WORDS = 40
+_DAILY_TIP_MAX_WORDS = 80
+_DAILY_TIP_MAX_ATTEMPTS = 3
+
+# Must stay in sync with the "STATES AND ERRORS REFERENCE FRAMEWORK"
+# section of prompts/content_generation_system.txt — same four States,
+# same four Errors, same wording. Each Daily Tip is anchored to exactly
+# one of these eight (see generate_daily_tips()'s rotation), so a batch
+# request ("give me 10 daily tips") systematically covers the framework
+# instead of the model freely picking whatever idea it likes each time.
+_STATES = ["Rushing", "Frustration", "Fatigue", "Complacency"]
+_ERRORS = ["Eyes not on task", "Mind not on task", "Line of fire", "Balance, traction, grip"]
+_DAILY_TIP_FOCUS_ROTATION = [("State", s) for s in _STATES] + [("Error", e) for e in _ERRORS]
 
 # Seed pool used to force a different illustrative character/workplace into
 # each generated script, so back-to-back runs don't converge on the same
@@ -558,6 +576,8 @@ class BaseLLMService:
         monthly_topic_content: Optional[str] = None,
         common_data: Optional[str] = None,
         web_results: Optional[str] = None,
+        avoid_repeating: Optional[List[str]] = None,
+        daily_tip_focus: Optional[Tuple[str, str]] = None,
     ) -> str:
         """Content Generation Agent: turn (Content Type + Topic + retrieved
         Knowledge Base chunks) into one short, original piece of
@@ -574,8 +594,20 @@ class BaseLLMService:
             enrich with a real-world example/best practice, never a
             source of wording. Callers are responsible for fetching this
             (e.g. via a web search step) before calling this method.
-        All three default to None/omitted so existing callers that only
-        pass (content_type, topic, chunks) keep working unchanged.
+        avoid_repeating: previously-generated pieces of content for this
+          same (content_type, topic) pair in the current batch (e.g. tip
+          #1-4 of a 10-tip request). Passed back to the model so tip #5
+          picks a different angle/fact/phrasing instead of converging on
+          the same idea. Optional — a single one-off generation doesn't
+          need it.
+        daily_tip_focus: only meaningful when content_type == "Daily Tip".
+          A ("State", "Rushing") or ("Error", "Eyes not on task") pair —
+          see _DAILY_TIP_FOCUS_ROTATION — that this specific tip must be
+          built around, per the "STATES AND ERRORS REFERENCE FRAMEWORK"
+          rule that the State/Error is shown only through the learner's
+          actions/thoughts, never named outright in the tip itself.
+        All default to None/omitted so existing callers that only pass
+        (content_type, topic, chunks) keep working unchanged.
 
         Like generate_image_prompt(), this prompt pair has no separate
         user-prompt .txt template; the system prompt fully specifies the
@@ -594,6 +626,24 @@ class BaseLLMService:
             f"Topic: {topic}\n\n"
             f"Retrieved Context:\n{retrieved_chunks}"
         )
+        if daily_tip_focus:
+            kind, name = daily_tip_focus
+            user_prompt += (
+                f"\n\nDaily Tip Focus ({kind}): {name}\n"
+                f"Build this tip around a moment where this {kind.lower()} "
+                f"leads (or nearly leads) to an incident related to the "
+                f"Topic/Retrieved Context. Per the framework rules above, "
+                f"show it only through the learner's actions/thoughts — "
+                f"do not write \"{name}\" or any other State/Error name in "
+                f"the tip text itself."
+            )
+        if avoid_repeating:
+            already_generated = "\n".join(f"- {t}" for t in avoid_repeating)
+            user_prompt += (
+                f"\n\nAlready generated in this batch — pick a different fact, "
+                f"angle, or example; do not repeat or lightly reword any of "
+                f"these:\n{already_generated}"
+            )
         if monthly_topic_content and monthly_topic_content.strip():
             user_prompt += f"\n\nMonthly Topic Content:\n{monthly_topic_content.strip()}"
         if common_data and common_data.strip():
@@ -614,6 +664,110 @@ class BaseLLMService:
         if not content_text:
             raise RuntimeError(f"The model returned no content for '{content_type}' on topic '{topic}'.")
         return content_text
+
+    def _generate_one_daily_tip(
+        self,
+        chunks: List[dict],
+        topic: str,
+        common_data: Optional[str] = None,
+        web_results: Optional[str] = None,
+        avoid_repeating: Optional[List[str]] = None,
+        focus: Optional[Tuple[str, str]] = None,
+    ) -> str:
+        """Generate a single 40-80 word Daily Tip, retrying a bounded
+        number of times if the model's output falls outside that word
+        range. Internal helper — see generate_daily_tips() for the public,
+        batch-aware entry point."""
+        last_text = ""
+        for attempt in range(1, _DAILY_TIP_MAX_ATTEMPTS + 1):
+            last_text = self.generate_learning_content(
+                content_type="Daily Tip",
+                topic=topic,
+                chunks=chunks,
+                common_data=common_data,
+                web_results=web_results,
+                avoid_repeating=avoid_repeating,
+                daily_tip_focus=focus,
+            )
+            word_count = len(last_text.split())
+            if _DAILY_TIP_MIN_WORDS <= word_count <= _DAILY_TIP_MAX_WORDS:
+                return last_text
+            logger.warning(
+                "Daily Tip attempt %d/%d was %d words (need %d-%d). Retrying.",
+                attempt, _DAILY_TIP_MAX_ATTEMPTS, word_count,
+                _DAILY_TIP_MIN_WORDS, _DAILY_TIP_MAX_WORDS,
+            )
+        # All attempts missed the target length — return the closest one
+        # rather than failing the request outright.
+        return last_text
+
+    def generate_daily_tip(
+        self,
+        chunks: List[dict],
+        topic: str = "",
+        common_data: Optional[str] = None,
+        web_results: Optional[str] = None,
+    ) -> str:
+        """Backward-compatible single-tip entry point. Equivalent to
+        generate_daily_tips(..., count=1)[0]. See that method's docstring
+        for the full behavior."""
+        return self.generate_daily_tips(
+            chunks, topic=topic, count=1,
+            common_data=common_data, web_results=web_results,
+        )[0]
+
+    def generate_daily_tips(
+        self,
+        chunks: List[dict],
+        topic: str = "",
+        count: int = 1,
+        common_data: Optional[str] = None,
+        web_results: Optional[str] = None,
+    ) -> List[str]:
+        """Daily Tip: one or more 40-80 word, conversational, practical
+        learning tips — "advice from an experienced safety coach", per
+        prompts/content_generation_system.txt's Daily Tip section.
+
+        topic="" is valid and expected for "give me today's daily tip"
+        (no specific subject named) — the model picks the best-supported
+        angle from whatever chunks were retrieved. Which chunks those are
+        is entirely the caller's choice: pass Retriever.retrieve_for_daily_tip()
+        output for the global "no dedicated folder" behavior, or
+        Retriever.retrieve(query, folders=[...]) output to scope the tips
+        to specific folder(s) (e.g. "10 daily tips from video_scripts").
+
+        count: how many distinct tips to generate in one call (e.g. 10 for
+        "give me 10 daily tips"). Each tip is anchored to one State or
+        Error from the framework (_DAILY_TIP_FOCUS_ROTATION), starting at
+        a random point in the 8-item rotation and advancing one per tip —
+        so a batch systematically covers different States/Errors instead
+        of the model freely picking whatever idea it likes each time, and
+        back-to-back single-tip requests don't all land on the same one.
+        Each tip after the first is also generated with the previous ones
+        passed back to the model as avoid_repeating, for extra insurance
+        against near-duplicates even when two tips share a focus (count > 8).
+        Capped implicitly by how much distinct material is actually in
+        `chunks` — if the source material only supports a few genuinely
+        different tips, the model may still converge somewhat; that's a
+        content-availability limit, not a bug in this loop.
+        """
+        effective_topic = topic.strip() if topic and topic.strip() else "today's safety learning"
+        count = max(1, count)
+        rotation = _DAILY_TIP_FOCUS_ROTATION
+        start = random.randrange(len(rotation))
+        tips: List[str] = []
+        for i in range(count):
+            focus = rotation[(start + i) % len(rotation)]
+            tip = self._generate_one_daily_tip(
+                chunks,
+                effective_topic,
+                common_data=common_data,
+                web_results=web_results,
+                avoid_repeating=tips or None,
+                focus=focus,
+            )
+            tips.append(tip)
+        return tips
 
     def generate_video_and_story(self, learning_objectives: str, chunks: List[dict]) -> Tuple[str, str, str]:
         """Generate the dual Video Script + Story training output

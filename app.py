@@ -67,6 +67,7 @@ from services.document_resolver import (  # noqa: E402
     ambiguous_candidates,
 )
 from services.canonical_naming import canonical_filename, is_canonical  # noqa: E402
+from services import name_mapping  # noqa: E402
 
 
 # ===========================================================================
@@ -647,8 +648,11 @@ with st.sidebar:
                 # Anything landing locally from S3 might still carry a raw,
                 # non-canonical name (e.g. someone dropped a file straight
                 # into the bucket). Rename those to canonical form --
-                # locally, in S3, and in Qdrant if already indexed under the
-                # old name -- before deciding what still needs ingestion.
+                # locally and in Qdrant if already indexed under the old
+                # name -- before deciding what still needs ingestion. The
+                # S3 object itself is left untouched under its original
+                # name; the mapping records that name so it can still be
+                # found later even though the local/display name changed.
                 qdrant_service = get_qdrant_service()
                 local_files = [
                     f for f in os.listdir(settings.PDF_FOLDER) if f.lower().endswith(SUPPORTED_EXTENSIONS)
@@ -662,8 +666,8 @@ with st.sidebar:
                     new_path = os.path.join(settings.PDF_FOLDER, new_name)
                     try:
                         os.rename(old_path, new_path)
-                        s3_storage.rename_file(old_name, new_name)
                         qdrant_service.rename_document(old_name, new_name)
+                        name_mapping.rename_local(settings.PDF_FOLDER, old_name, new_name)
                         renamed[old_name] = new_name
                     except Exception as exc:
                         st.warning(f"Could not rename '{old_name}' to canonical form: {exc}", icon="⚠️")
@@ -735,7 +739,14 @@ with st.sidebar:
 
             if s3_storage:
                 try:
-                    s3_uri = s3_storage.upload_file(dest_path, canonical_name)
+                    # Upload under the ORIGINAL filename, not the canonical
+                    # one -- the bucket keeps whatever name the file
+                    # arrived under. `canonical_name` is what's used
+                    # locally and in the UI; the mapping lets us find the
+                    # object back in S3 later (e.g. to delete it) even
+                    # though the two names differ.
+                    s3_uri = s3_storage.upload_file(dest_path, uploaded_file.name)
+                    name_mapping.set_s3_key(settings.PDF_FOLDER, canonical_name, uploaded_file.name)
                     st.toast(f"Backed up to {s3_uri}", icon="📦")
                 except Exception as exc:
                     st.warning(f"Saved locally, but S3 upload failed: {exc}", icon="⚠️")

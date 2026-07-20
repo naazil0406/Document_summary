@@ -32,6 +32,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config.settings import settings
 from services.qdrant_db import QdrantService
 from services.canonical_naming import canonical_filename, is_canonical, reshorten_canonical
+from services import name_mapping
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,10 @@ def migrate(dry_run: bool = False) -> list[tuple[str, str]]:
                 "Re-keyed %d Qdrant point(s) for '%s' -> '%s' (UI will show the new name).",
                 count, old_name, new_name,
             )
+
+            # S3 keeps the object under `old_name` -- record that mapping
+            # so delete/lookup by the new canonical name can still find it.
+            name_mapping.rename_local(folder, old_name, new_name)
 
             renamed.append((old_name, new_name))
         except Exception as exc:

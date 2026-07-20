@@ -79,8 +79,26 @@ def _shorten_label(label: str, max_len: int = _MAX_LABEL_LEN) -> str:
     core_words = [w for w in pool if not w.isdigit()]
     if digits and core_words:
         label_word = next((w for w in core_words if w.lower() in _LABEL_WORDS), None)
-        base = label_word or max(core_words, key=len)
-        keyword = base + digits[0]
+        if label_word:
+            # Use the digit that immediately follows the label word in the
+            # ORIGINAL word order (e.g. "Unit 4" -> 4), not just
+            # digits[0] -- a leading version number like "CERT 2.0" would
+            # otherwise be picked instead of the real unit number,
+            # silently mislabeling the file (e.g. "CERT 2.0_Unit 4..."
+            # becoming "Unit2" instead of "Unit4").
+            try:
+                label_idx = words.index(label_word)
+            except ValueError:
+                label_idx = -1
+            if 0 <= label_idx < len(words) - 1 and words[label_idx + 1].isdigit():
+                chosen_digit = words[label_idx + 1]
+            else:
+                chosen_digit = digits[0]
+            base = label_word
+        else:
+            base = max(core_words, key=len)
+            chosen_digit = digits[0]
+        keyword = base + chosen_digit
         return keyword[:max_len]
 
     alnum_with_digit = [w for w in pool if w.isalnum() and any(c.isdigit() for c in w) and not w.isdigit()]
