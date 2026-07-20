@@ -49,21 +49,34 @@ class Settings:
     # --- Document Chunking (Stage 1: headings / sections / paragraphs) ---
     DOC_CHUNK_HEADING_MAX_LENGTH: int = int(os.getenv("DOC_CHUNK_HEADING_MAX_LENGTH", "80"))
     DOC_CHUNK_MIN_PARAGRAPH_LENGTH: int = int(os.getenv("DOC_CHUNK_MIN_PARAGRAPH_LENGTH", "20"))
+    USE_SEMANTIC_BOUNDARY_DETECTION: bool = os.getenv(
+        "USE_SEMANTIC_BOUNDARY_DETECTION", "true"
+    ).strip().lower() in ("1", "true", "yes", "on")
 
     # --- Embeddings ---
     EMBEDDING_MODEL_NAME: str = os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-m3")
     EMBEDDING_DEVICE: str = os.getenv("EMBEDDING_DEVICE", "cpu")
     INDEX_BATCH_SIZE: int = int(os.getenv("INDEX_BATCH_SIZE", "8"))
 
-    # --- Qdrant ---
+    # --- Qdrant (local Docker / local binary only) ---
+    # Production uses a Qdrant instance on this machine — NOT Qdrant Cloud.
+    # Start with:  docker compose up -d qdrant
+    QDRANT_LOCAL: bool = os.getenv("QDRANT_LOCAL", "true").strip().lower() in (
+        "1", "true", "yes", "on"
+    )
     QDRANT_URL: str = os.getenv("QDRANT_URL", "http://localhost:6333")
     QDRANT_API_KEY: str = os.getenv("QDRANT_API_KEY", "")
     QDRANT_COLLECTION_NAME: str = os.getenv("QDRANT_COLLECTION_NAME", "company_docs")
 
-    # --- Retrieval ---
+    # --- Retrieval & Re-ranking ---
     TOP_K: int = int(os.getenv("TOP_K", "40"))
     TOP_K_SUMMARY: int = int(os.getenv("TOP_K_SUMMARY", "40"))
     MIN_RELEVANCE_SCORE: float = float(os.getenv("MIN_RELEVANCE_SCORE", "0.05"))
+    USE_RERANKER: bool = os.getenv("USE_RERANKER", "true").strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+    RERANKER_MODEL_NAME: str = os.getenv("RERANKER_MODEL_NAME", "BAAI/bge-reranker-v2-m3")
+    TOP_K_RERANK: int = int(os.getenv("TOP_K_RERANK", "10"))
 
     # --- LLM provider switch: "openrouter" (default) or "bedrock" ---
     # Bedrock reuses the AWS_* credentials/region already configured above
@@ -177,5 +190,24 @@ class Settings:
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 
 
-settings = Settings()
+def _normalize_qdrant_url(url: str, local_only: bool) -> str:
+    """Force localhost when QDRANT_LOCAL=true (ignore cloud URLs)."""
+    normalized = (url or "http://localhost:6333").strip().rstrip("/")
+    if not local_only:
+        return normalized
+    lowered = normalized.lower()
+    if "localhost" in lowered or "127.0.0.1" in lowered:
+        return normalized
+    return "http://localhost:6333"
+
+
+_settings = Settings()
+_settings = Settings(
+    **_settings.__dict__
+    | {
+        "QDRANT_URL": _normalize_qdrant_url(_settings.QDRANT_URL, _settings.QDRANT_LOCAL),
+        "QDRANT_API_KEY": "" if _settings.QDRANT_LOCAL else _settings.QDRANT_API_KEY,
+    }
+)
+settings = _settings
 setup_logging(settings.LOG_LEVEL)

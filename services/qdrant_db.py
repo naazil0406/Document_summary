@@ -92,6 +92,7 @@ class QdrantService:
                     # unpack the nested metadata dict on every query.
                     "folder": (chunk.metadata or {}).get("folder", ""),
                     "subfolder": (chunk.metadata or {}).get("subfolder", ""),
+                    "s3_key": (chunk.metadata or {}).get("s3_key", chunk.filename),
                     "metadata": chunk.metadata or {},
                 },
             )
@@ -238,6 +239,7 @@ class QdrantService:
                     "toc_section": payload.get("toc_section", ""),
                     "folder": payload.get("folder", ""),
                     "subfolder": payload.get("subfolder", ""),
+                    "s3_key": payload.get("s3_key", ""),
                     "metadata": payload.get("metadata", {}),
                 }
             )
@@ -530,8 +532,18 @@ class QdrantService:
     def enrich_document_metadata(
         self, original_filename: str, canonical_name: str, s3_key: str,
         folder_name: str = "", local_path: str = "", upload_date: str = "",
+        subfolder: str = "",
     ) -> int:
-        """Add/repair metadata in place without changing vector IDs or text."""
+        """Add/repair metadata in place without changing vector IDs or text.
+
+        Always stores the original S3 filename, complete object key, and
+        folder hierarchy — never generated aliases as the storage identity.
+        """
+        from services.s3_storage import parse_s3_object_path
+
+        parsed = parse_s3_object_path(s3_key) if s3_key else {}
+        folder = folder_name or parsed.get("folder", "")
+        nested = subfolder or parsed.get("subfolder", "")
         selector = qdrant_models.FilterSelector(filter=qdrant_models.Filter(must=[
             qdrant_models.FieldCondition(
                 key="filename", match=qdrant_models.MatchValue(value=original_filename)
@@ -540,8 +552,9 @@ class QdrantService:
         payload = {
             "original_filename": original_filename,
             "canonical_name": canonical_name,
-            "s3_key": s3_key,
-            "folder": folder_name,
+            "s3_key": s3_key or parsed.get("s3_key", original_filename),
+            "folder": folder,
+            "subfolder": nested,
             "local_path": local_path,
         }
         if upload_date:

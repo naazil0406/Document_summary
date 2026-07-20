@@ -1,0 +1,43 @@
+"""
+Transcript document (.txt / transcript) parser.
+
+Extracts content and structure from transcript text files into PageContent objects.
+"""
+
+import logging
+import os
+import re
+from typing import List
+
+from services.pdf_parser import PageContent
+
+logger = logging.getLogger(__name__)
+
+# Pattern for timestamps like [00:12:34] or (01:23)
+_TIMESTAMP_RE = re.compile(r"[\(\[]?\d{1,2}:\d{2}(?::\d{2})?[\)\]]?")
+
+
+class TranscriptParser:
+    """Extracts content from Transcript (.txt) files."""
+
+    def __init__(self, folder_path: str = ""):
+        self.folder_path = folder_path
+
+    def extract_pages(self, file_path: str) -> List[PageContent]:
+        """Read a transcript file and return PageContent."""
+        filename = os.path.basename(file_path)
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+        except Exception as exc:
+            logger.error("Failed to read transcript file '%s': %s", file_path, exc)
+            return []
+
+        return [
+            PageContent(
+                filename=filename,
+                page_number=1,
+                page_label="1",
+                text=content.strip(),
+            )
+        ]

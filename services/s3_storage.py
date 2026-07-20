@@ -48,6 +48,44 @@ def _normalize_prefix(prefix: str) -> str:
     return f"{prefix}/" if prefix else ""
 
 
+def parse_s3_object_path(key: str) -> dict:
+    """Split an S3 object key into original filename + nested folder parts.
+
+    Example
+        Warehouse/Safety/Heat Stress Prevention Guide.pdf
+    becomes
+        filename  = Heat Stress Prevention Guide.pdf
+        folder    = Warehouse
+        subfolder = Safety
+        s3_key    = Warehouse/Safety/Heat Stress Prevention Guide.pdf
+
+    Unlimited nesting is preserved in ``subfolder`` (e.g. ``Safety/Heat Stress``).
+    The original key string is never rewritten, shortened, or re-cased.
+    """
+    key = (key or "").replace("\\", "/").lstrip("/")
+    if not key or key.endswith("/"):
+        return {
+            "filename": "",
+            "folder": "",
+            "subfolder": "",
+            "s3_key": key,
+            "folder_path": "",
+        }
+
+    parts = [part for part in key.split("/") if part]
+    filename = parts[-1]
+    folder = parts[0] if len(parts) > 1 else ""
+    subfolder = "/".join(parts[1:-1]) if len(parts) > 2 else ""
+    folder_path = "/".join(parts[:-1])
+    return {
+        "filename": filename,
+        "folder": folder,
+        "subfolder": subfolder,
+        "s3_key": key,
+        "folder_path": folder_path,
+    }
+
+
 class S3Storage:
     """Thin wrapper around an S3 bucket used as durable document storage.
 
@@ -197,8 +235,12 @@ class S3Storage:
     def list_objects(self) -> List[dict]:
         """Return authoritative S3 objects with their complete keys.
 
-        Unlike :meth:`list_files`, this preserves folder information and is
+        Unlike :meth:`list_files`, this preserves every folder level and is
         therefore safe when two folders contain the same basename.
+
+        Each object includes the original ``filename``, top-level ``folder``,
+        nested ``subfolder`` path, complete ``s3_key`` / ``key``, and
+        ``folder_path`` (folder + subfolder joined).
         """
         objects: dict[str, dict] = {}
         paginator = self.client.get_paginator("list_objects_v2")
@@ -208,10 +250,16 @@ class S3Storage:
                     key = obj["Key"]
                     if key == prefix or key.endswith("/"):
                         continue
+                    parsed = parse_s3_object_path(key)
                     objects[key] = {
                         "key": key,
-                        "filename": os.path.basename(key),
-                        "folder_name": os.path.dirname(key).strip("/"),
+                        "s3_key": parsed["s3_key"],
+                        "filename": parsed["filename"],
+                        "folder": parsed["folder"],
+                        "subfolder": parsed["subfolder"],
+                        "folder_path": parsed["folder_path"],
+                        # Backward-compatible alias used by older callers.
+                        "folder_name": parsed["folder_path"],
                         "upload_date": obj.get("LastModified").isoformat() if obj.get("LastModified") else "",
                     }
         return [objects[key] for key in sorted(objects)]

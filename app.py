@@ -51,8 +51,17 @@ from services.docx_parser import DocxParser  # noqa: E402
 from services.excel_parser import ExcelParser  # noqa: E402
 from services.pptx_parser import PptxParser  # noqa: E402
 from services.image_parser import ImageParser, IMAGE_EXTENSIONS  # noqa: E402
+from services.markdown_parser import MarkdownParser  # noqa: E402
+from services.xml_parser import XMLParser  # noqa: E402
+from services.json_parser import JSONParser  # noqa: E402
+from services.transcript_parser import TranscriptParser  # noqa: E402
+from services.reranker import ReRankerService  # noqa: E402
 from services.s3_storage import S3Storage  # noqa: E402
-from services.chunking import Chunk, DocumentChunker, SemanticChunkingService  # noqa: E402
+from services.chunking import (
+    Chunk,
+    chunk_extracted_pages,
+    chunk_pages_legacy,
+)
 from services.embeddings import EmbeddingService  # noqa: E402
 from services.qdrant_db import QdrantService  # noqa: E402
 from services.retriever import Retriever, SUMMARY_KEYWORDS  # noqa: E402
@@ -79,7 +88,7 @@ from services.canonical_naming import canonical_display_name  # noqa: E402
 # same PageContent objects, so everything downstream (chunking, embedding,
 # Qdrant storage, retrieval) is identical regardless of source format.
 SUPPORTED_EXTENSIONS = (
-    ".pdf", ".docx", ".xlsx", ".xlsm", ".xls", ".csv", ".pptx",
+    ".pdf", ".docx", ".xlsx", ".xlsm", ".xls", ".csv", ".pptx", ".md", ".xml", ".json", ".txt",
 ) + IMAGE_EXTENSIONS
 
 # ---------------------------------------------------------------------------
@@ -118,6 +127,16 @@ def get_s3_storage() -> Optional[S3Storage]:
 
 
 @st.cache_resource(show_spinner=False)
+def get_reranker_service() -> Optional[ReRankerService]:
+    if not settings.USE_RERANKER:
+        return None
+    return ReRankerService(
+        model_name=settings.RERANKER_MODEL_NAME,
+        device=settings.EMBEDDING_DEVICE,
+    )
+
+
+@st.cache_resource(show_spinner=False)
 def get_retriever(_embedding_service, _qdrant_service) -> Retriever:
     return Retriever(
         _embedding_service,
@@ -125,6 +144,7 @@ def get_retriever(_embedding_service, _qdrant_service) -> Retriever:
         top_k=settings.TOP_K,
         summary_top_k=settings.TOP_K_SUMMARY,
         min_relevance_score=settings.MIN_RELEVANCE_SCORE,
+        reranker_service=get_reranker_service(),
     )
 
 
@@ -217,7 +237,7 @@ def display_name(filename: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# PDF -> pages -> document chunks -> semantic chunks
+# PDF -> pages -> semantic boundaries -> document chunks -> semantic chunks
 # (shared by both ingestion and summarization)
 # ---------------------------------------------------------------------------
 def parse_and_chunk(
@@ -225,62 +245,25 @@ def parse_and_chunk(
     embedding_service: EmbeddingService,
     parser: PDFParser = None,
     use_semantic_chunking: bool = True,
+    folder: str = "",
 ):
     parser = parser or PDFParser(pdf_folder=settings.PDF_FOLDER)
     pages = parser.extract_pages(file_path)
     if not pages:
         return None
 
-    if isinstance(parser, ExcelParser):
-        return [
-            Chunk(
-                chunk_id=str(uuid.uuid4()),
-                text=page.text,
-                filename=page.filename,
-                page_number=page.page_number,
-                page_label=page.page_label,
-                page_start=(page.metadata or {}).get("row_start", page.page_number),
-                page_end=(page.metadata or {}).get("row_end", page.page_number),
-                metadata=dict(page.metadata or {}),
-                toc_section=(page.metadata or {}).get("toc_section", ""),
-            )
-            for page in pages
-            if page.text and page.text.strip()
-        ] or None
+    chunk_kwargs = {
+        "use_semantic_chunking": use_semantic_chunking,
+        "folder": folder,
+        "heading_max_length": settings.DOC_CHUNK_HEADING_MAX_LENGTH,
+        "min_paragraph_length": settings.DOC_CHUNK_MIN_PARAGRAPH_LENGTH,
+    }
 
-    document_chunker = DocumentChunker(
-        heading_max_length=settings.DOC_CHUNK_HEADING_MAX_LENGTH,
-        min_paragraph_length=settings.DOC_CHUNK_MIN_PARAGRAPH_LENGTH,
-    )
-    document_chunks = document_chunker.chunk_pages(pages)
-    if not document_chunks:
-        return None
+    if settings.USE_SEMANTIC_BOUNDARY_DETECTION:
+        chunks = chunk_extracted_pages(pages, embedding_service, **chunk_kwargs)
+    else:
+        chunks = chunk_pages_legacy(pages, embedding_service, **chunk_kwargs)
 
-    if not use_semantic_chunking:
-        return [
-            Chunk(
-                chunk_id=str(uuid.uuid4()),
-                text=dc.text,
-                filename=dc.filename,
-                page_number=dc.page_number,
-                page_label=dc.page_label,
-                page_start=dc.page_start,
-                page_end=dc.page_end,
-                metadata=dict(dc.metadata or {}),
-                toc_section=(dc.metadata or {}).get("toc_section", ""),
-            )
-            for idx, dc in enumerate(document_chunks)
-        ]
-
-    semantic_chunker = SemanticChunkingService(
-        embeddings=embedding_service.langchain_embeddings,
-        buffer_size=settings.SEMANTIC_BUFFER_SIZE,
-        breakpoint_threshold_type=settings.SEMANTIC_BREAKPOINT_TYPE,
-        breakpoint_threshold_amount=settings.SEMANTIC_BREAKPOINT_AMOUNT,
-        max_chunk_size=settings.MAX_CHUNK_SIZE,
-        chunk_overlap=settings.CHUNK_OVERLAP,
-    )
-    chunks = semantic_chunker.chunk_documents(document_chunks)
     return chunks or None
 
 
@@ -418,17 +401,51 @@ def ingest_single_image(file_path: str, embedding_service: EmbeddingService,
     return len(chunks)
 
 
+def ingest_single_markdown(file_path: str, embedding_service: EmbeddingService,
+                           qdrant_service: QdrantService) -> int:
+    parser = MarkdownParser(folder_path=settings.PDF_FOLDER)
+    chunks = parse_and_chunk(file_path, embedding_service, parser=parser)
+    if not chunks:
+        return 0
+    _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service)
+    return len(chunks)
+
+
+def ingest_single_xml(file_path: str, embedding_service: EmbeddingService,
+                       qdrant_service: QdrantService) -> int:
+    parser = XMLParser(folder_path=settings.PDF_FOLDER)
+    chunks = parse_and_chunk(file_path, embedding_service, parser=parser)
+    if not chunks:
+        return 0
+    _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service)
+    return len(chunks)
+
+
+def ingest_single_json(file_path: str, embedding_service: EmbeddingService,
+                        qdrant_service: QdrantService) -> int:
+    parser = JSONParser(folder_path=settings.PDF_FOLDER)
+    chunks = parse_and_chunk(file_path, embedding_service, parser=parser)
+    if not chunks:
+        return 0
+    _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service)
+    return len(chunks)
+
+
+def ingest_single_transcript(file_path: str, embedding_service: EmbeddingService,
+                            qdrant_service: QdrantService) -> int:
+    parser = TranscriptParser(folder_path=settings.PDF_FOLDER)
+    chunks = parse_and_chunk(file_path, embedding_service, parser=parser)
+    if not chunks:
+        return 0
+    _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service)
+    return len(chunks)
+
+
 def ingest_document_by_extension(
     dest_path: str,
     embedding_service: EmbeddingService,
     qdrant_service: QdrantService,
 ) -> int:
-    """Dispatch a single file to the right ingest_single_* function based on
-    its extension. Shared by the manual upload button and the S3 sync flow
-    so both paths stay in sync as new extensions are added.
-    Supports: .pdf, .docx, .xlsx, .xlsm, .xls, .csv, .pptx, and image files
-    (.png, .jpg, .jpeg, .webp, .bmp, .tiff)
-    """
     file_ext = os.path.splitext(dest_path)[1].lower()
 
     if file_ext == ".docx":
@@ -441,6 +458,14 @@ def ingest_document_by_extension(
         return ingest_single_image(dest_path, embedding_service, qdrant_service)
     elif file_ext == ".pdf":
         return ingest_single_pdf(dest_path, embedding_service, qdrant_service)
+    elif file_ext == ".md":
+        return ingest_single_markdown(dest_path, embedding_service, qdrant_service)
+    elif file_ext == ".xml":
+        return ingest_single_xml(dest_path, embedding_service, qdrant_service)
+    elif file_ext == ".json":
+        return ingest_single_json(dest_path, embedding_service, qdrant_service)
+    elif file_ext == ".txt":
+        return ingest_single_transcript(dest_path, embedding_service, qdrant_service)
     else:
         logger.warning("Skipping '%s': unsupported extension '%s'.", dest_path, file_ext)
         return 0
@@ -567,7 +592,7 @@ def answer_question(
         return "An error occurred while retrieving relevant information."
 
     if not chunks:
-        return "The information is not available in the provided documents."
+        return FALLBACK_ANSWER
 
     is_summary = is_summary_question(normalized_question)
     logger.info("Query intent: %s", "SUMMARY" if is_summary else "Q&A")
@@ -676,25 +701,16 @@ with st.sidebar:
                 if pending:
                     progress_placeholder = st.empty()
                     for i, filename in enumerate(pending, start=1):
-                        progress_placeholder.info(
-                            f"Indexing {i}/{len(pending)}: '{filename}'...", icon="⏳"
-                        )
+                        progress_placeholder.info("Indexing updates…", icon="⏳")
                         dest_path = os.path.join(settings.PDF_FOLDER, filename)
                         try:
                             ingest_document_by_extension(dest_path, embedding_service, qdrant_service)
                         except Exception as exc:
-                            st.warning(f"Could not index '{filename}': {exc}", icon="⚠️")
+                            logger.warning("Could not index '%s': %s", filename, exc)
                     progress_placeholder.empty()
 
-                if downloaded and pending:
-                    st.toast(
-                        f"Fetched {len(downloaded)} new document(s) and indexed {len(pending)}.",
-                        icon="✅",
-                    )
-                elif pending:
-                    st.toast(f"Indexed {len(pending)} previously un-indexed document(s).", icon="✅")
-                elif downloaded:
-                    st.toast(f"Fetched {len(downloaded)} new document(s) from S3.", icon="📦")
+                if downloaded or pending:
+                    st.toast("Sync completed successfully.", icon="✅")
                 else:
                     st.toast("Already up to date with S3.", icon="📦")
             except Exception as exc:
@@ -734,14 +750,14 @@ with st.sidebar:
                     if s3_storage.file_exists(original_filename):
                         st.info("This filename already exists in S3; using the existing authoritative object.", icon="ℹ️")
                     else:
-                        s3_uri = s3_storage.upload_file(dest_path, original_filename)
-                        st.toast(f"Backed up to {s3_uri}", icon="📦")
+                        s3_storage.upload_file(dest_path, original_filename)
+                        st.toast("Document backed up to S3.", icon="📦")
                 except Exception as exc:
                     st.warning(f"Saved locally, but S3 upload failed: {exc}", icon="⚠️")
 
             try:
                 if not already_ingested:
-                    with st.spinner(f"Reading and indexing '{display_name(original_filename)}'..."):
+                    with st.spinner("Reading and indexing document..."):
                         n_chunks = ingest_document_by_extension(
                             dest_path, embedding_service, qdrant_service
                         )
@@ -749,58 +765,22 @@ with st.sidebar:
                         st.error("No extractable content found in this document.")
                         st.stop()
                     st.success(
-                        f"Indexed {n_chunks} chunks from '{display_name(original_filename)}'. "
-                        "Ask a question or request a summary in the chat below.",
+                        "Document indexed. Ask a question or request a summary in the chat below.",
                         icon="✅",
                     )
                 else:
-                    st.info(f"'{display_name(original_filename)}' is already indexed.", icon="ℹ️")
+                    st.info("This document is already indexed.", icon="ℹ️")
             except Exception as exc:
                 st.error(f"Something went wrong while processing the document: {exc}")
 
     existing = _existing_documents()
+    # Document inventory is intentionally not shown in the chat UI.
     if existing:
-        st.divider()
-        st.header("📚 Previously uploaded")
-        display_to_filename = {display_name(filename): filename for filename in existing}
-        pick_display = st.selectbox("Re-summarize an existing document", ["—"] + sorted(display_to_filename))
-        pick = display_to_filename.get(pick_display)
-        if pick and st.button("Summarize selected", use_container_width=True):
-            # Use cached summary if available — skip Qdrant + LLM entirely
-            if pick in st.session_state.summary_cache:
-                cached = st.session_state.summary_cache[pick]
-                summary = cached["summary"]
-                questions = cached["questions"]
-            else:
-                qdrant_service = get_qdrant_service()
-                summary_llm = get_summary_llm()
-                try:
-                    with st.spinner("Generating summary..."):
-                        summary = summarize_indexed_document(
-                            pick,
-                            qdrant_service,
-                            summary_llm,
-                        )
-                    with st.spinner("Coming up with follow-up questions..."):
-                        questions = generate_suggested_questions(summary_llm, summary, pick)
-                    st.session_state.summary_cache[pick] = {
-                        "summary": summary,
-                        "questions": questions,
-                    }
-                except Exception as exc:
-                    st.error(f"Something went wrong while summarizing: {exc}")
-                    summary = None
-                    questions = []
-            if summary:
-                st.session_state.summary_text = summary
-                st.session_state.summary_filename = pick
-                st.session_state.suggested_questions = questions
-
         st.divider()
         st.header("📋 Generate Training Script")
         st.caption(
-            "Generates a cinematic, story-driven training video script from all "
-            "uploaded documents. The format is fixed; the story is freshly "
+            "Generates a cinematic, story-driven training video script from the "
+            "knowledge base. The format is fixed; the story is freshly "
             "invented every time you click — click again for a different one."
         )
 
@@ -808,7 +788,7 @@ with st.sidebar:
             qdrant_service = get_qdrant_service()
             presentation_llm = get_presentation_llm()
             try:
-                with st.spinner("Gathering content from all documents..."):
+                with st.spinner("Gathering content from the knowledge base..."):
                     all_chunks = []
                     for pdf in existing:
                         chunks = _get_all_chunks(pdf, qdrant_service)
@@ -817,10 +797,10 @@ with st.sidebar:
                 if not all_chunks:
                     st.error("No indexed content found. Please upload and process at least one document first.")
                 else:
-                    with st.spinner(f"Generating training script from {len(existing)} document(s)... this may take a moment."):
+                    with st.spinner("Generating training script… this may take a moment."):
                         presentation_text = presentation_llm.generate_presentation(all_chunks)
                     st.session_state.presentation_text = presentation_text
-                    st.session_state.presentation_filename = "All Documents"
+                    st.session_state.presentation_filename = "Training Script"
                     st.session_state.presentation_saved_path = save_narrative_script(
                         presentation_text, st.session_state.presentation_filename
                     )
@@ -845,7 +825,9 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 if st.session_state.summary_text:
     with st.container(border=True):
-        st.subheader(f"🧾 Summary — {display_name(st.session_state.summary_filename)}")
+        # Cite the original S3 filename only when a specific document was summarized.
+        source_label = st.session_state.summary_filename or ""
+        st.subheader(f"🧾 Summary{f' — {source_label}' if source_label else ''}")
         st.write(st.session_state.summary_text)
 
         if st.session_state.suggested_questions:
@@ -857,14 +839,14 @@ if st.session_state.summary_text:
 
 if st.session_state.presentation_text:
     with st.container(border=True):
-        st.subheader(f"📋 Training Script — {st.session_state.presentation_filename}")
+        st.subheader("📋 Training Script")
         st.markdown(st.session_state.presentation_text)
         if st.session_state.presentation_saved_path:
-            st.caption(f"💾 Saved locally to `{st.session_state.presentation_saved_path}`")
+            st.caption("Script saved locally.")
         st.download_button(
             label="⬇️ Download Training Script (.txt)",
             data=st.session_state.presentation_text,
-            file_name=f"training_script_{st.session_state.presentation_filename}.txt",
+            file_name="training_script.txt",
             mime="text/plain",
             use_container_width=True,
         )
@@ -878,7 +860,7 @@ for role, text in st.session_state.chat_history:
     with st.chat_message(role):
         st.write(text)
 
-typed_question = st.chat_input("Ask a question about your documents...")
+typed_question = st.chat_input("Ask a question…")
 question_to_answer = st.session_state.pending_question or typed_question
 st.session_state.pending_question = None
 

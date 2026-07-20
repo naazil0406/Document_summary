@@ -1,34 +1,30 @@
 """
-Two-stage chunking service.
+Three-stage chunking service.
+
+Stage 0 — Semantic Boundary Detection (SemanticBoundaryDetector):
+    Converts extracted pages into a structured document, identifies logical
+    semantic boundaries (headings, procedures, warnings, tables, etc.), and
+    emits protected semantic blocks for downstream chunking.
 
 Stage 1 — Document Chunking (DocumentChunker):
-    Splits each page's raw text along structural boundaries — headings,
-    sections, paragraphs — while respecting page boundaries (a document
-    chunk never spans two pages, since chunking runs per PageContent).
-
-    TOC/Index-based chunking:
-    When a Table of Contents page is detected, the document pages are
-    re-grouped by TOC entries so each section (e.g. "Unit 2 – Variables")
-    becomes a labelled set of DocumentChunks.  Inside each TOC section the
-    normal per-page structural splitter still runs, so sub-headings within
-    the section are respected — the section is NOT collapsed into one giant
-    chunk.  metadata["toc_section"] is set on every chunk that came from a
-    named section so the retriever can filter by it.
-
-    TOC pages themselves are skipped (not stored as chunks) since they
-    contain only navigation data that would pollute retrieval results.
+    Legacy structural splitter used when semantic boundary detection is
+    disabled. Splits each page's raw text along headings, sections, and
+    paragraphs while respecting page boundaries.
 
 Stage 2 — Semantic Chunking (SemanticChunkingService):
     Runs LangChain's SemanticChunker (using BGE-M3 embeddings for
     similarity-based boundary detection) *inside* each document chunk
-    produced by Stage 1.  A size-based safeguard
-    (RecursiveCharacterTextSplitter) is applied to any resulting chunk
-    that exceeds max_chunk_size.
+    produced by Stage 0/1. Protected semantic blocks are never split.
+    A size-based safeguard (RecursiveCharacterTextSplitter) is applied to
+    any resulting chunk that exceeds max_chunk_size.
 
-Pipeline: pages -> DocumentChunker -> SemanticChunkingService -> Chunk[]
+Production pipeline:
+    pages -> pages_to_structured_document -> SemanticBoundaryDetector
+    -> document_chunks_from_semantic_blocks -> SemanticChunkingService -> Chunk[]
 """
 
 import logging
+import os
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -518,6 +514,25 @@ class SemanticChunkingService:
         """Apply semantic chunking inside each document chunk, producing final Chunk objects."""
         all_chunks: List[Chunk] = []
         for doc_chunk in document_chunks:
+            chunk_meta = dict(doc_chunk.metadata) if doc_chunk.metadata else {}
+            if chunk_meta.get("protected"):
+                cleaned = doc_chunk.text.strip()
+                if cleaned:
+                    all_chunks.append(
+                        Chunk(
+                            chunk_id=str(uuid.uuid4()),
+                            text=cleaned,
+                            filename=doc_chunk.filename,
+                            page_number=doc_chunk.page_number,
+                            page_label=doc_chunk.page_label,
+                            page_start=doc_chunk.page_start,
+                            page_end=doc_chunk.page_end,
+                            metadata=chunk_meta,
+                            toc_section=chunk_meta.get("toc_section", ""),
+                        )
+                    )
+                continue
+
             try:
                 texts = self._split_text(doc_chunk.text)
             except Exception as exc:
@@ -552,3 +567,325 @@ class SemanticChunkingService:
             len(all_chunks), len(document_chunks),
         )
         return all_chunks
+
+
+def document_chunks_from_semantic_blocks(
+    semantic_result: dict,
+    default_filename: str = "",
+) -> List[DocumentChunk]:
+    """Convert semantic boundary output into :class:`DocumentChunk` objects."""
+    chunks: List[DocumentChunk] = []
+    for block in semantic_result.get("semantic_blocks", []) or []:
+        content = (block.get("content") or "").strip()
+        if not content:
+            continue
+
+        metadata = dict(block.get("metadata") or {})
+        metadata["semantic_block_id"] = block.get("block_id", "")
+        metadata["content_type"] = block.get("content_type", "paragraph")
+        metadata["protected"] = block.get("protected", False)
+        metadata["heading_path"] = block.get("heading_path", [])
+        metadata["parent_heading"] = block.get("parent_heading", "")
+        metadata["section_id"] = block.get("section_id", "")
+        if block.get("heading_path"):
+            metadata.setdefault("toc_section", block["heading_path"][-1])
+
+        filename = metadata.get("filename") or default_filename
+        page_start = block.get("page_start") or metadata.get("page_start") or 1
+        page_end = block.get("page_end") or metadata.get("page_end") or page_start
+        heading_path = block.get("heading_path") or []
+        page_label = " > ".join(heading_path) if heading_path else filename
+
+        chunks.append(
+            DocumentChunk(
+                text=content,
+                filename=filename,
+                page_number=int(page_start),
+                page_label=page_label,
+                page_start=int(page_start),
+                page_end=int(page_end),
+                metadata=metadata,
+            )
+        )
+    return chunks
+
+
+def _page_bounds(page: PageContent) -> Tuple[int, int]:
+    meta = page.metadata or {}
+    page_start = meta.get("row_start") or meta.get("page_start") or page.page_number
+    page_end = meta.get("row_end") or meta.get("page_end") or page.page_number
+    return int(page_start), int(page_end)
+
+
+def _page_parts_to_section_nodes(
+    page: PageContent,
+    chunker: "DocumentChunker",
+    section_id_prefix: str,
+) -> Tuple[List[str], List[dict]]:
+    """Split one page into top-level content strings and heading subsections."""
+    content_items: List[str] = []
+    subsections: List[dict] = []
+    page_start, page_end = _page_bounds(page)
+
+    for section_text in chunker._split_into_sections(page.text):
+        lines = section_text.splitlines()
+        if not lines:
+            continue
+
+        first_line = lines[0].strip()
+        if chunker._is_heading(first_line):
+            body = "\n".join(lines[1:]).strip()
+            subsections.append(
+                {
+                    "section_id": f"{section_id_prefix}_{len(subsections) + 1:02d}",
+                    "title": first_line,
+                    "content": chunker._split_section_into_paragraphs(body) if body else [],
+                    "subsections": [],
+                    "metadata": {"page_start": page_start, "page_end": page_end},
+                }
+            )
+        else:
+            content_items.extend(chunker._split_section_into_paragraphs(section_text))
+
+    if not content_items and not subsections and page.text.strip():
+        content_items.extend(chunker._split_section_into_paragraphs(page.text))
+
+    return content_items, subsections
+
+
+def _group_pages_for_structure(pages: List[PageContent]) -> List[Tuple[str, List[PageContent]]]:
+    """Group extracted pages into logical sections (TOC-aware when possible)."""
+    if not pages:
+        return []
+
+    toc_pages = [page for page in pages if _is_toc_page(page.text)]
+    toc_page_numbers = {page.page_number for page in toc_pages}
+    content_pages = [page for page in pages if page.page_number not in toc_page_numbers]
+
+    if not content_pages:
+        content_pages = list(pages)
+
+    if toc_pages:
+        max_page_number = max(page.page_number for page in pages)
+        entries = _parse_toc_entries("\n".join(page.text for page in toc_pages), max_page_number)
+        if entries:
+            page_by_number = {page.page_number: page for page in content_pages}
+            grouped: List[Tuple[str, List[PageContent]]] = []
+            sorted_entries = sorted(entries, key=lambda item: item[1])
+            for index, (title, start_page) in enumerate(sorted_entries):
+                end_page = (
+                    sorted_entries[index + 1][1] - 1
+                    if index + 1 < len(sorted_entries)
+                    else max(page.page_number for page in content_pages)
+                )
+                section_pages = [
+                    page_by_number[page_number]
+                    for page_number in range(start_page, end_page + 1)
+                    if page_number in page_by_number
+                ]
+                if section_pages:
+                    grouped.append((title, section_pages))
+            if grouped:
+                covered = {page.page_number for _, section_pages in grouped for page in section_pages}
+                for page in content_pages:
+                    if page.page_number not in covered:
+                        grouped.append((page.page_label or f"Page {page.page_number}", [page]))
+                return grouped
+
+    grouped_by_key: Dict[str, List[PageContent]] = {}
+    order: List[str] = []
+    for page in content_pages:
+        key = (page.metadata or {}).get("toc_section") or page.page_label or f"Page {page.page_number}"
+        if key not in grouped_by_key:
+            grouped_by_key[key] = []
+            order.append(key)
+        grouped_by_key[key].append(page)
+    return [(key, grouped_by_key[key]) for key in order]
+
+
+def pages_to_structured_document(
+    pages: List[PageContent],
+    *,
+    document_title: str = "",
+    folder: str = "",
+    subfolder: str = "",
+    s3_key: str = "",
+    heading_max_length: int = 80,
+    min_paragraph_length: int = 20,
+) -> dict:
+    """Convert extracted pages into the restructured-document JSON schema."""
+    if not pages:
+        return {"document_title": "", "sections": [], "metadata": {}}
+
+    filename = pages[0].filename
+    first_meta = pages[0].metadata or {}
+    title = document_title or os.path.splitext(filename)[0]
+    doc_metadata = {
+        "filename": filename,
+        "folder": folder or first_meta.get("folder", ""),
+        "subfolder": subfolder or first_meta.get("subfolder", ""),
+        "s3_key": s3_key or first_meta.get("s3_key", ""),
+        "content_type": first_meta.get("content_type", ""),
+    }
+
+    chunker = DocumentChunker(
+        heading_max_length=heading_max_length,
+        min_paragraph_length=min_paragraph_length,
+    )
+
+    sections: List[dict] = []
+    for section_index, (group_title, group_pages) in enumerate(
+        _group_pages_for_structure(pages), start=1
+    ):
+        section_id = f"section_{section_index:02d}"
+        content_items: List[str] = []
+        subsections: List[dict] = []
+        page_starts = [_page_bounds(page)[0] for page in group_pages]
+        page_ends = [_page_bounds(page)[1] for page in group_pages]
+
+        for page in group_pages:
+            page_content, page_subsections = _page_parts_to_section_nodes(
+                page,
+                chunker,
+                section_id,
+            )
+            content_items.extend(page_content)
+            subsections.extend(page_subsections)
+
+        sections.append(
+            {
+                "section_id": section_id,
+                "title": group_title,
+                "content": content_items,
+                "subsections": subsections,
+                "metadata": {
+                    "page_start": min(page_starts),
+                    "page_end": max(page_ends),
+                    "toc_section": group_title,
+                },
+            }
+        )
+
+    return {
+        "document_title": title,
+        "sections": sections,
+        "metadata": doc_metadata,
+    }
+
+
+def chunk_extracted_pages(
+    pages: List[PageContent],
+    embedding_service=None,
+    *,
+    use_semantic_chunking: bool = True,
+    document_title: str = "",
+    folder: str = "",
+    heading_max_length: int = 80,
+    min_paragraph_length: int = 20,
+) -> List[Chunk]:
+    """Production chunking path: semantic boundaries then optional semantic chunking."""
+    structured = pages_to_structured_document(
+        pages,
+        document_title=document_title,
+        folder=folder,
+        heading_max_length=heading_max_length,
+        min_paragraph_length=min_paragraph_length,
+    )
+    chunks = chunk_restructured_document(structured, embedding_service, use_semantic_chunking)
+    if folder:
+        for chunk in chunks:
+            chunk.metadata = dict(chunk.metadata or {})
+            chunk.metadata["folder"] = folder
+    return chunks
+
+
+def chunk_pages_legacy(
+    pages: List[PageContent],
+    embedding_service=None,
+    *,
+    use_semantic_chunking: bool = True,
+    heading_max_length: int = 80,
+    min_paragraph_length: int = 20,
+) -> List[Chunk]:
+    """Legacy chunking path: DocumentChunker -> SemanticChunkingService."""
+    document_chunker = DocumentChunker(
+        heading_max_length=heading_max_length,
+        min_paragraph_length=min_paragraph_length,
+    )
+    document_chunks = document_chunker.chunk_pages(pages)
+    if not document_chunks:
+        return []
+
+    if not use_semantic_chunking or embedding_service is None:
+        return [
+            Chunk(
+                chunk_id=str(uuid.uuid4()),
+                text=doc_chunk.text,
+                filename=doc_chunk.filename,
+                page_number=doc_chunk.page_number,
+                page_label=doc_chunk.page_label,
+                page_start=doc_chunk.page_start,
+                page_end=doc_chunk.page_end,
+                metadata=dict(doc_chunk.metadata or {}),
+                toc_section=(doc_chunk.metadata or {}).get("toc_section", ""),
+            )
+            for doc_chunk in document_chunks
+        ]
+
+    from config.settings import settings
+
+    semantic_chunker = SemanticChunkingService(
+        embeddings=embedding_service.langchain_embeddings,
+        buffer_size=settings.SEMANTIC_BUFFER_SIZE,
+        breakpoint_threshold_type=settings.SEMANTIC_BREAKPOINT_TYPE,
+        breakpoint_threshold_amount=settings.SEMANTIC_BREAKPOINT_AMOUNT,
+        max_chunk_size=settings.MAX_CHUNK_SIZE,
+        chunk_overlap=settings.CHUNK_OVERLAP,
+    )
+    return semantic_chunker.chunk_documents(document_chunks) or []
+
+
+def chunk_restructured_document(
+    document: dict,
+    embedding_service=None,
+    use_semantic_chunking: bool = True,
+) -> List[Chunk]:
+    """Run Semantic Boundary Detection, then optional semantic chunking.
+
+    Pipeline:
+        restructured JSON -> semantic blocks -> DocumentChunks -> Chunks
+    """
+    from services.semantic_boundary_detector import detect_semantic_boundaries
+
+    semantic_result = detect_semantic_boundaries(document)
+    document_chunks = document_chunks_from_semantic_blocks(semantic_result)
+    if not document_chunks:
+        return []
+
+    if not use_semantic_chunking or embedding_service is None:
+        return [
+            Chunk(
+                chunk_id=block.metadata.get("semantic_block_id") or str(uuid.uuid4()),
+                text=block.text,
+                filename=block.filename,
+                page_number=block.page_number,
+                page_label=block.page_label,
+                page_start=block.page_start,
+                page_end=block.page_end,
+                metadata=dict(block.metadata),
+                toc_section=block.metadata.get("toc_section", ""),
+            )
+            for block in document_chunks
+        ]
+
+    from config.settings import settings
+
+    semantic_chunker = SemanticChunkingService(
+        embeddings=embedding_service.langchain_embeddings,
+        buffer_size=settings.SEMANTIC_BUFFER_SIZE,
+        breakpoint_threshold_type=settings.SEMANTIC_BREAKPOINT_TYPE,
+        breakpoint_threshold_amount=settings.SEMANTIC_BREAKPOINT_AMOUNT,
+        max_chunk_size=settings.MAX_CHUNK_SIZE,
+        chunk_overlap=settings.CHUNK_OVERLAP,
+    )
+    return semantic_chunker.chunk_documents(document_chunks) or []

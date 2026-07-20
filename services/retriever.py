@@ -32,6 +32,7 @@ from typing import List, Optional
 from config.settings import settings
 from services.embeddings import EmbeddingService
 from services.qdrant_db import QdrantService
+from services.reranker import ReRankerService
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +79,7 @@ class Retriever:
         summary_top_k: int = settings.TOP_K_SUMMARY,
         min_relevance_score: float = settings.MIN_RELEVANCE_SCORE,
         toc_match_threshold: float = TOC_MATCH_THRESHOLD,
+        reranker_service: Optional[ReRankerService] = None,
     ):
         self.embedding_service = embedding_service
         self.qdrant_service = qdrant_service
@@ -85,6 +87,7 @@ class Retriever:
         self.summary_top_k = summary_top_k
         self.min_relevance_score = min_relevance_score
         self.toc_match_threshold = toc_match_threshold
+        self.reranker_service = reranker_service
 
     # ── Normalisation ────────────────────────────────────────────────────────
 
@@ -485,6 +488,11 @@ class Retriever:
                     "returning all relevance-filtered chunks.",
                     unit_hint,
                 )
+
+        if filtered and self.reranker_service:
+            top_k_rerank = settings.TOP_K_RERANK
+            logger.info("Re-ranking top %d candidates using CrossEncoder...", len(filtered))
+            filtered = self.reranker_service.rerank(query, filtered, top_k=top_k_rerank)
 
         if filtered:
             logger.info(

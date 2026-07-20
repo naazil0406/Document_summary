@@ -938,11 +938,6 @@ button { font-family: inherit; cursor: pointer; }
 
     <div class="rail-divider"></div>
 
-    <div class="rail-section-label">Indexed documents</div>
-    <div class="rail-docs" id="railDocs">
-      <div class="rail-doc-empty">No documents yet.</div>
-    </div>
-
     <div class="rail-status" id="railStatus">
       <div class="rail-status-row"><span>LLM</span><span id="statusLlm">—</span></div>
       <div class="rail-status-row"><span>S3 sync</span><span id="statusS3">—</span></div>
@@ -955,8 +950,8 @@ button { font-family: inherit; cursor: pointer; }
     <!-- ---------- CHAT PANEL ---------- -->
     <section class="panel is-active" id="panel-chat">
       <header class="panel-head">
-        <h1>Chat with your documents</h1>
-        <p>Ask a question, or ask for a summary — Chatbot will decide which and cite the source file.</p>
+        <h1>Knowledge Assistant</h1>
+        <p>Ask a question about your knowledge base. Answers cite only the sources used for that response.</p>
         <button class="ghost-btn" id="clearChatBtn">Clear conversation</button>
       </header>
 
@@ -972,12 +967,12 @@ button { font-family: inherit; cursor: pointer; }
       <div class="thread" id="thread">
         <div class="thread-empty" id="threadEmpty">
           <p>Nothing here yet.</p>
-          <p class="thread-empty-sub">Upload a document, then ask something like "summarize safety_manual.pdf" or "what's the refund policy?"</p>
+          <p class="thread-empty-sub">Ask a question about a topic, policy, or procedure. The assistant searches the knowledge base automatically.</p>
         </div>
       </div>
 
       <form class="composer" id="composerForm">
-        <input type="text" id="composerInput" placeholder="Ask a question about your documents…" autocomplete="off" />
+        <input type="text" id="composerInput" placeholder="Ask a question…" autocomplete="off" />
         <button type="submit" id="composerSend">Send</button>
       </form>
     </section>
@@ -1004,11 +999,6 @@ button { font-family: inherit; cursor: pointer; }
         <strong>Not configured?</strong> Set <code>S3_BUCKET_NAME</code> (and optionally
         <code>AWS_ACCESS_KEY_ID</code> / <code>AWS_SECRET_ACCESS_KEY</code>) in <code>.env</code>
         to enable this.
-      </div>
-
-      <h2 class="section-title">Library</h2>
-      <div class="doc-grid" id="docGrid">
-        <div class="doc-grid-empty">Nothing indexed yet — sync from S3 to populate your library.</div>
       </div>
     </section>
 
@@ -1148,8 +1138,6 @@ button { font-family: inherit; cursor: pointer; }
   }
 
   // ---- Elements ----
-  const railDocs = document.getElementById("railDocs");
-  const docGrid = document.getElementById("docGrid");
   const thread = document.getElementById("thread");
   const threadEmpty = document.getElementById("threadEmpty");
   const summaryCard = document.getElementById("summaryCard");
@@ -1174,7 +1162,15 @@ button { font-family: inherit; cursor: pointer; }
 
   function showSummaryCard(filename, summaryText, questions) {
     summaryCard.hidden = false;
-    document.getElementById("summaryCardFile").textContent = filename;
+    // Only show a filename when this answer actually used one — never an inventory label.
+    const fileEl = document.getElementById("summaryCardFile");
+    if (filename) {
+      fileEl.textContent = filename;
+      fileEl.hidden = false;
+    } else {
+      fileEl.textContent = "";
+      fileEl.hidden = true;
+    }
     document.getElementById("summaryCardText").textContent = summaryText;
     const chips = document.getElementById("summaryCardChips");
     chips.innerHTML = "";
@@ -1185,66 +1181,6 @@ button { font-family: inherit; cursor: pointer; }
       chips.appendChild(chip);
     });
   }
-
-  // ---- Documents (rail + library grid) ----
-  async function refreshDocuments() {
-    let docs = [];
-    try {
-      const data = await api("/api/documents");
-      docs = data.documents || [];
-    } catch (exc) {
-      railDocs.innerHTML = `<div class="rail-doc-empty">Could not load documents.</div>`;
-      docGrid.innerHTML = `<div class="doc-grid-empty">Could not load documents: ${escapeHtml(exc.message)}</div>`;
-      return;
-    }
-
-    railDocs.innerHTML = docs.length
-      ? docs.map((d) => `<div class="rail-doc"><span class="rail-doc-name">${escapeHtml(d.canonical_name)}</span><span class="rail-doc-ext">${extOf(d.original_filename)}</span></div>`).join("")
-      : `<div class="rail-doc-empty">No documents yet.</div>`;
-
-    docGrid.innerHTML = docs.length
-      ? docs.map((d) => `
-          <div class="doc-card" data-ext="${extOf(d.original_filename)}" data-filename="${escapeHtml(d.original_filename)}" data-display-name="${escapeHtml(d.canonical_name)}">
-            <div class="doc-card-name">${escapeHtml(d.canonical_name)}</div>
-            <div class="doc-card-actions">
-              <button data-action="summarize">Summarize</button>
-              <button data-action="delete" class="danger">Remove</button>
-            </div>
-          </div>`).join("")
-      : `<div class="doc-grid-empty">Nothing indexed yet — the first upload starts your library.</div>`;
-  }
-
-  docGrid.addEventListener("click", async (e) => {
-    const btn = e.target.closest("button[data-action]");
-    if (!btn) return;
-    const card = btn.closest(".doc-card");
-    const filename = card.dataset.filename;
-    const displayName = card.dataset.displayName;
-
-    if (btn.dataset.action === "summarize") {
-      btn.disabled = true;
-      btn.textContent = "Summarizing…";
-      try {
-        const data = await api(`/api/documents/${encodeURIComponent(filename)}/summarize`, { method: "POST" });
-        showSummaryCard(data.filename, data.summary, data.questions);
-        document.querySelector('.rail-nav-item[data-panel="chat"]').click();
-      } catch (exc) {
-        alert("Could not summarize: " + exc.message);
-      } finally {
-        btn.disabled = false;
-        btn.textContent = "Summarize";
-      }
-    } else if (btn.dataset.action === "delete") {
-      if (!confirm(`Remove "${displayName}" from the library?`)) return;
-      try {
-        await api(`/api/documents/${encodeURIComponent(filename)}`, { method: "DELETE" });
-        await refreshDocuments();
-      } catch (exc) {
-        alert("Could not remove: " + exc.message);
-      }
-    }
-  });
-
   // ---- Status ----
   async function refreshStatus() {
     try {
@@ -1261,7 +1197,7 @@ button { font-family: inherit; cursor: pointer; }
     const el = document.getElementById("syncBucketStatus");
     try {
       const data = await api("/api/status");
-      el.textContent = data.s3_enabled ? `Connected — s3://${data.s3_bucket}` : "Not configured";
+      el.textContent = data.s3_enabled ? "Connected" : "Not configured";
       document.getElementById("syncBtn").disabled = !data.s3_enabled;
     } catch (exc) {
       el.textContent = "Could not check status";
@@ -1316,14 +1252,14 @@ button { font-family: inherit; cursor: pointer; }
       const data = await api("/api/sync", { method: "POST" });
       if (data.up_to_date) {
         logLine(syncLog, "Already up to date with S3.", "info");
+      } else if (data.ok) {
+        logLine(syncLog, "Sync completed successfully.", "ok");
       } else {
-        if (data.downloaded.length) logLine(syncLog, `Fetched ${data.downloaded.length} document(s) from S3.`, "ok");
-        if (data.indexed.length) logLine(syncLog, `Indexed: ${data.indexed.join(", ")}`, "ok");
+        logLine(syncLog, "Sync finished.", "info");
       }
-      Object.entries(data.errors || {}).forEach(([name, err]) => {
-        logLine(syncLog, `Could not index "${name}": ${err}`, "err");
-      });
-      await refreshDocuments();
+      if (data.error_count > 0) {
+        logLine(syncLog, "Some documents could not be indexed. Check server logs.", "err");
+      }
     } catch (exc) {
       logLine(syncLog, "Sync failed: " + exc.message, "err");
     } finally {
@@ -1589,7 +1525,7 @@ button { font-family: inherit; cursor: pointer; }
 
   // ---- Init ----
   refreshStatus();
-  refreshDocuments();
+  refreshSyncStatus();
 })();
 
 </script>

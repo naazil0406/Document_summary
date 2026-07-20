@@ -2,17 +2,14 @@
 Ingestion pipeline entry point.
 
 Flow:
-S3 Bucket -> PDF Folder -> Docling Lite -> Document Chunking ->
+S3 Bucket -> PDF Folder -> Document Extraction ->
+Semantic Boundary Detection -> Document Chunking ->
 Semantic Chunking -> BGE-M3 Embeddings -> Qdrant
-
-Run with:
-    python -m scripts.ingest
 """
 
 import logging
 import os
 import sys
-import uuid
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -22,7 +19,11 @@ from services.docx_parser import DocxParser
 from services.excel_parser import ExcelParser
 from services.pptx_parser import PptxParser
 from services.image_parser import ImageParser, IMAGE_EXTENSIONS
-from services.chunking import Chunk, DocumentChunker, SemanticChunkingService
+from services.markdown_parser import MarkdownParser
+from services.xml_parser import XMLParser
+from services.json_parser import JSONParser
+from services.transcript_parser import TranscriptParser
+from services.chunking import chunk_extracted_pages, chunk_pages_legacy
 from services.embeddings import EmbeddingService
 from services.qdrant_db import QdrantService
 from services.s3_storage import S3Storage
@@ -30,7 +31,7 @@ from services.s3_storage import S3Storage
 logger = logging.getLogger(__name__)
 
 SUPPORTED_INGESTION_EXTENSIONS = (
-    ".pdf", ".docx", ".xlsx", ".xlsm", ".xls", ".csv", ".pptx",
+    ".pdf", ".docx", ".xlsx", ".xlsm", ".xls", ".csv", ".pptx", ".md", ".xml", ".json", ".txt",
 ) + IMAGE_EXTENSIONS
 
 
@@ -55,6 +56,14 @@ def _select_parser(file_path: str, folder: str):
         return PptxParser(pptx_folder=folder)
     if ext in IMAGE_EXTENSIONS:
         return ImageParser(image_folder=folder)
+    if ext == ".md":
+        return MarkdownParser(folder_path=folder)
+    if ext == ".xml":
+        return XMLParser(folder_path=folder)
+    if ext == ".json":
+        return JSONParser(folder_path=folder)
+    if ext == ".txt":
+        return TranscriptParser(folder_path=folder)
     return PDFParser(pdf_folder=folder)
 
 
@@ -63,40 +72,15 @@ def _parse_and_chunk(file_path: str, embedding_service: EmbeddingService, parser
     if not pages:
         return None
 
-    if isinstance(parser, ExcelParser):
-        return [
-            Chunk(
-                chunk_id=str(uuid.uuid4()),
-                text=page.text,
-                filename=page.filename,
-                page_number=page.page_number,
-                page_label=page.page_label,
-                page_start=page.metadata["row_start"],
-                page_end=page.metadata["row_end"],
-                metadata=dict(page.metadata),
-                toc_section=page.metadata.get("toc_section", ""),
-            )
-            for page in pages
-            if page.text.strip()
-        ] or None
+    chunk_kwargs = {
+        "use_semantic_chunking": not isinstance(parser, ExcelParser),
+        "heading_max_length": settings.DOC_CHUNK_HEADING_MAX_LENGTH,
+        "min_paragraph_length": settings.DOC_CHUNK_MIN_PARAGRAPH_LENGTH,
+    }
 
-    document_chunker = DocumentChunker(
-        heading_max_length=settings.DOC_CHUNK_HEADING_MAX_LENGTH,
-        min_paragraph_length=settings.DOC_CHUNK_MIN_PARAGRAPH_LENGTH,
-    )
-    document_chunks = document_chunker.chunk_pages(pages)
-    if not document_chunks:
-        return None
-
-    semantic_chunker = SemanticChunkingService(
-        embeddings=embedding_service.langchain_embeddings,
-        buffer_size=settings.SEMANTIC_BUFFER_SIZE,
-        breakpoint_threshold_type=settings.SEMANTIC_BREAKPOINT_TYPE,
-        breakpoint_threshold_amount=settings.SEMANTIC_BREAKPOINT_AMOUNT,
-        max_chunk_size=settings.MAX_CHUNK_SIZE,
-        chunk_overlap=settings.CHUNK_OVERLAP,
-    )
-    return semantic_chunker.chunk_documents(document_chunks) or None
+    if settings.USE_SEMANTIC_BOUNDARY_DETECTION:
+        return chunk_extracted_pages(pages, embedding_service, **chunk_kwargs) or None
+    return chunk_pages_legacy(pages, embedding_service, **chunk_kwargs) or None
 
 
 def sync_from_s3() -> None:

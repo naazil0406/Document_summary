@@ -37,8 +37,13 @@ from services.docx_parser import DocxParser
 from services.excel_parser import ExcelParser
 from services.pptx_parser import PptxParser
 from services.image_parser import ImageParser, IMAGE_EXTENSIONS
+from services.markdown_parser import MarkdownParser
+from services.xml_parser import XMLParser
+from services.json_parser import JSONParser
+from services.transcript_parser import TranscriptParser
+from services.reranker import ReRankerService
 from services.s3_storage import S3Storage
-from services.chunking import Chunk, DocumentChunker, SemanticChunkingService
+from services.chunking import Chunk, chunk_extracted_pages, chunk_pages_legacy
 from services.embeddings import EmbeddingService
 from services.qdrant_db import QdrantService
 from services.retriever import Retriever, SUMMARY_KEYWORDS
@@ -60,7 +65,7 @@ from services.image_generation_service import HuggingFaceFluxService, Pollinatio
 logger = logging.getLogger(__name__)
 
 SUPPORTED_EXTENSIONS = (
-    ".pdf", ".docx", ".xlsx", ".xlsm", ".xls", ".csv", ".pptx",
+    ".pdf", ".docx", ".xlsx", ".xlsm", ".xls", ".csv", ".pptx", ".md", ".xml", ".json", ".txt",
 ) + IMAGE_EXTENSIONS
 
 # ===========================================================================
@@ -99,6 +104,16 @@ def get_s3_storage() -> Optional[S3Storage]:
 
 
 @lru_cache(maxsize=1)
+def get_reranker_service() -> Optional[ReRankerService]:
+    if not settings.USE_RERANKER:
+        return None
+    return ReRankerService(
+        model_name=settings.RERANKER_MODEL_NAME,
+        device=settings.EMBEDDING_DEVICE,
+    )
+
+
+@lru_cache(maxsize=1)
 def get_retriever() -> Retriever:
     return Retriever(
         get_embedding_service(),
@@ -106,6 +121,7 @@ def get_retriever() -> Retriever:
         top_k=settings.TOP_K,
         summary_top_k=settings.TOP_K_SUMMARY,
         min_relevance_score=settings.MIN_RELEVANCE_SCORE,
+        reranker_service=get_reranker_service(),
     )
 
 
@@ -305,6 +321,35 @@ def local_write_path(filename: str) -> str:
     return os.path.join(month_dir, filename)
 
 
+def document_path_metadata(file_path: str, s3_key: str = "") -> dict:
+    """Derive original filename + nested folder metadata from a local path.
+
+    Relative path under PDF_FOLDER mirrors the S3 object hierarchy, e.g.
+    ``Warehouse/Safety/Heat Stress Prevention Guide.pdf``.
+    """
+    from services.s3_storage import parse_s3_object_path
+
+    abs_root = os.path.abspath(settings.PDF_FOLDER)
+    abs_path = os.path.abspath(file_path)
+    try:
+        rel = os.path.relpath(abs_path, abs_root).replace("\\", "/")
+    except ValueError:
+        rel = os.path.basename(file_path)
+
+    if rel.startswith(".."):
+        rel = os.path.basename(file_path)
+
+    key = (s3_key or rel).replace("\\", "/").lstrip("/")
+    parsed = parse_s3_object_path(key)
+    return {
+        "filename": parsed["filename"] or os.path.basename(file_path),
+        "folder": parsed["folder"],
+        "subfolder": parsed["subfolder"],
+        "folder_path": parsed["folder_path"],
+        "s3_key": parsed["s3_key"] or key,
+    }
+
+
 def reconcile_local_names_with_s3(s3_storage: S3Storage, qdrant_service: QdrantService) -> dict:
     """Rename known legacy local aliases to their authoritative S3 names.
 
@@ -399,69 +444,33 @@ def parse_and_chunk(
     if not pages:
         return None
 
-    if isinstance(parser, ExcelParser):
-        chunks = [
-            Chunk(
-                chunk_id=str(uuid.uuid4()),
-                text=page.text,
-                filename=page.filename,
-                page_number=page.page_number,
-                page_label=page.page_label,
-                page_start=(page.metadata or {}).get("row_start", page.page_number),
-                page_end=(page.metadata or {}).get("row_end", page.page_number),
-                metadata=dict(page.metadata or {}),
-                toc_section=(page.metadata or {}).get("toc_section", ""),
-            )
-            for page in pages
-            if page.text and page.text.strip()
-        ] or None
-        return _tag_folder(chunks, folder)
+    chunk_kwargs = {
+        "use_semantic_chunking": use_semantic_chunking,
+        "folder": folder,
+        "heading_max_length": settings.DOC_CHUNK_HEADING_MAX_LENGTH,
+        "min_paragraph_length": settings.DOC_CHUNK_MIN_PARAGRAPH_LENGTH,
+    }
 
-    document_chunker = DocumentChunker(
-        heading_max_length=settings.DOC_CHUNK_HEADING_MAX_LENGTH,
-        min_paragraph_length=settings.DOC_CHUNK_MIN_PARAGRAPH_LENGTH,
-    )
-    document_chunks = document_chunker.chunk_pages(pages)
-    if not document_chunks:
-        return None
+    if settings.USE_SEMANTIC_BOUNDARY_DETECTION:
+        chunks = chunk_extracted_pages(pages, embedding_service, **chunk_kwargs)
+    else:
+        chunks = chunk_pages_legacy(pages, embedding_service, **chunk_kwargs)
 
-    if not use_semantic_chunking:
-        chunks = [
-            Chunk(
-                chunk_id=str(uuid.uuid4()),
-                text=dc.text,
-                filename=dc.filename,
-                page_number=dc.page_number,
-                page_label=dc.page_label,
-                page_start=dc.page_start,
-                page_end=dc.page_end,
-                metadata=dict(dc.metadata or {}),
-                toc_section=(dc.metadata or {}).get("toc_section", ""),
-            )
-            for dc in document_chunks
-        ]
-        return _tag_folder(chunks, folder)
-
-    semantic_chunker = SemanticChunkingService(
-        embeddings=embedding_service.langchain_embeddings,
-        buffer_size=settings.SEMANTIC_BUFFER_SIZE,
-        breakpoint_threshold_type=settings.SEMANTIC_BREAKPOINT_TYPE,
-        breakpoint_threshold_amount=settings.SEMANTIC_BREAKPOINT_AMOUNT,
-        max_chunk_size=settings.MAX_CHUNK_SIZE,
-        chunk_overlap=settings.CHUNK_OVERLAP,
-    )
-    chunks = semantic_chunker.chunk_documents(document_chunks)
     return _tag_folder(chunks or None, folder)
 
 
-def _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service) -> None:
+def _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service, path_meta: Optional[dict] = None) -> None:
     filename = chunks[0].filename
+    path_meta = path_meta or {}
     for chunk in chunks:
         metadata = dict(chunk.metadata or {})
         metadata.update({
-            "original_filename": filename,
+            "original_filename": path_meta.get("filename") or filename,
+            # Display label only — never used as storage identity / filename.
             "canonical_name": canonical_display_name(filename),
-            "s3_key": metadata.get("s3_key", filename),
+            "s3_key": path_meta.get("s3_key") or metadata.get("s3_key") or filename,
+            "folder": path_meta.get("folder") or metadata.get("folder") or "",
+            "subfolder": path_meta.get("subfolder") or metadata.get("subfolder") or "",
             "local_path": local_read_path(filename),
         })
         chunk.metadata = metadata
@@ -487,11 +496,19 @@ def _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service) -> N
 
 def ingest_single_pdf(file_path: str, embedding_service, qdrant_service, folder: str = "") -> int:
     parser = PDFParser(pdf_folder=settings.PDF_FOLDER)
+    path_meta = document_path_metadata(file_path)
+    folder = folder or path_meta.get("folder", "")
     chunks = parse_and_chunk(file_path, embedding_service, parser=parser, folder=folder)
     if not chunks:
         return 0
 
-    _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service)
+    for chunk in chunks:
+        chunk.metadata = dict(chunk.metadata or {})
+        chunk.metadata.setdefault("subfolder", path_meta.get("subfolder", ""))
+        chunk.metadata.setdefault("s3_key", path_meta.get("s3_key", chunk.filename))
+
+    path_meta = _apply_path_metadata(chunks, file_path, folder=folder)
+    _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service, path_meta=path_meta)
 
     filename = os.path.basename(file_path)
     toc_records = [
@@ -514,39 +531,113 @@ def ingest_single_pdf(file_path: str, embedding_service, qdrant_service, folder:
     return len(chunks)
 
 
+def _apply_path_metadata(chunks, file_path: str, folder: str = "") -> dict:
+    """Stamp original S3 filename / folder / subfolder / s3_key onto chunks."""
+    path_meta = document_path_metadata(file_path)
+    if folder:
+        path_meta["folder"] = folder
+    for chunk in chunks:
+        chunk.metadata = dict(chunk.metadata or {})
+        chunk.metadata.setdefault("folder", path_meta.get("folder", ""))
+        chunk.metadata.setdefault("subfolder", path_meta.get("subfolder", ""))
+        chunk.metadata.setdefault("s3_key", path_meta.get("s3_key", chunk.filename))
+        chunk.metadata.setdefault("original_filename", path_meta.get("filename", chunk.filename))
+    return path_meta
+
+
 def ingest_single_docx(file_path: str, embedding_service, qdrant_service, folder: str = "") -> int:
     parser = DocxParser(docx_folder=settings.PDF_FOLDER)
+    path_meta = document_path_metadata(file_path)
+    folder = folder or path_meta.get("folder", "")
     chunks = parse_and_chunk(file_path, embedding_service, parser=parser, folder=folder)
     if not chunks:
         return 0
-    _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service)
+    path_meta = _apply_path_metadata(chunks, file_path, folder=folder)
+    _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service, path_meta=path_meta)
     return len(chunks)
 
 
 def ingest_single_excel(file_path: str, embedding_service, qdrant_service, restructure_llm=None, folder: str = "") -> int:
     parser = ExcelParser(excel_folder=settings.PDF_FOLDER, llm_service=restructure_llm)
+    path_meta = document_path_metadata(file_path)
+    folder = folder or path_meta.get("folder", "")
     chunks = parse_and_chunk(file_path, embedding_service, parser=parser, use_semantic_chunking=False, folder=folder)
     if not chunks:
         return 0
-    _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service)
+    path_meta = _apply_path_metadata(chunks, file_path, folder=folder)
+    _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service, path_meta=path_meta)
     return len(chunks)
 
 
 def ingest_single_pptx(file_path: str, embedding_service, qdrant_service, folder: str = "") -> int:
     parser = PptxParser(pptx_folder=settings.PDF_FOLDER)
+    path_meta = document_path_metadata(file_path)
+    folder = folder or path_meta.get("folder", "")
     chunks = parse_and_chunk(file_path, embedding_service, parser=parser, folder=folder)
     if not chunks:
         return 0
-    _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service)
+    path_meta = _apply_path_metadata(chunks, file_path, folder=folder)
+    _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service, path_meta=path_meta)
     return len(chunks)
 
 
 def ingest_single_image(file_path: str, embedding_service, qdrant_service, folder: str = "") -> int:
     parser = ImageParser(image_folder=settings.PDF_FOLDER)
+    path_meta = document_path_metadata(file_path)
+    folder = folder or path_meta.get("folder", "")
     chunks = parse_and_chunk(file_path, embedding_service, parser=parser, folder=folder)
     if not chunks:
         return 0
-    _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service)
+    path_meta = _apply_path_metadata(chunks, file_path, folder=folder)
+    _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service, path_meta=path_meta)
+    return len(chunks)
+
+
+def ingest_single_markdown(file_path: str, embedding_service, qdrant_service, folder: str = "") -> int:
+    parser = MarkdownParser(folder_path=settings.PDF_FOLDER)
+    path_meta = document_path_metadata(file_path)
+    folder = folder or path_meta.get("folder", "")
+    chunks = parse_and_chunk(file_path, embedding_service, parser=parser, folder=folder)
+    if not chunks:
+        return 0
+    path_meta = _apply_path_metadata(chunks, file_path, folder=folder)
+    _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service, path_meta=path_meta)
+    return len(chunks)
+
+
+def ingest_single_xml(file_path: str, embedding_service, qdrant_service, folder: str = "") -> int:
+    parser = XMLParser(folder_path=settings.PDF_FOLDER)
+    path_meta = document_path_metadata(file_path)
+    folder = folder or path_meta.get("folder", "")
+    chunks = parse_and_chunk(file_path, embedding_service, parser=parser, folder=folder)
+    if not chunks:
+        return 0
+    path_meta = _apply_path_metadata(chunks, file_path, folder=folder)
+    _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service, path_meta=path_meta)
+    return len(chunks)
+
+
+def ingest_single_json(file_path: str, embedding_service, qdrant_service, folder: str = "") -> int:
+    parser = JSONParser(folder_path=settings.PDF_FOLDER)
+    path_meta = document_path_metadata(file_path)
+    folder = folder or path_meta.get("folder", "")
+    chunks = parse_and_chunk(file_path, embedding_service, parser=parser, folder=folder)
+    if not chunks:
+        return 0
+    path_meta = _apply_path_metadata(chunks, file_path, folder=folder)
+    _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service, path_meta=path_meta)
+    return len(chunks)
+
+
+def ingest_single_transcript(file_path: str, embedding_service, qdrant_service, folder: str = "") -> int:
+    parser = TranscriptParser(folder_path=settings.PDF_FOLDER)
+    path_meta = document_path_metadata(file_path)
+    folder = folder or path_meta.get("folder", "")
+    chunks = parse_and_chunk(file_path, embedding_service, parser=parser, folder=folder)
+    if not chunks:
+        return 0
+    path_meta = _apply_path_metadata(chunks, file_path, folder=folder)
+    _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service, path_meta=path_meta)
     return len(chunks)
 
 
@@ -562,6 +653,14 @@ def ingest_document_by_extension(dest_path: str, embedding_service, qdrant_servi
         return ingest_single_image(dest_path, embedding_service, qdrant_service, folder=folder)
     elif file_ext == ".pdf":
         return ingest_single_pdf(dest_path, embedding_service, qdrant_service, folder=folder)
+    elif file_ext == ".md":
+        return ingest_single_markdown(dest_path, embedding_service, qdrant_service, folder=folder)
+    elif file_ext == ".xml":
+        return ingest_single_xml(dest_path, embedding_service, qdrant_service, folder=folder)
+    elif file_ext == ".json":
+        return ingest_single_json(dest_path, embedding_service, qdrant_service, folder=folder)
+    elif file_ext == ".txt":
+        return ingest_single_transcript(dest_path, embedding_service, qdrant_service, folder=folder)
     else:
         logger.warning("Skipping '%s': unsupported extension '%s'.", dest_path, file_ext)
         return 0
@@ -1049,7 +1148,7 @@ def answer_question(retriever, qa_llm, summary_llm, question: str) -> str:
         return "An error occurred while retrieving relevant information."
 
     if not chunks:
-        return "The information is not available in the provided documents."
+        return FALLBACK_ANSWER
 
     is_summary = is_summary_question(normalized_question)
     logger.info("Query intent: %s", "SUMMARY" if is_summary else "Q&A")
@@ -1296,18 +1395,20 @@ async def upload_document(file: UploadFile = File(...), folder: str = Form("")):
     except Exception as exc:
         raise HTTPException(502, f"S3 upload failed, so the document was not saved: {exc}")
 
+    path_meta = document_path_metadata(dest_path, s3_key=s3_uri.split("/", 3)[-1] if s3_uri else "")
+    folder = folder or path_meta.get("folder", "")
+
     if already_ingested:
         qdrant_service.enrich_document_metadata(
             filename, canonical_display_name(filename),
-            s3_uri.split("/", 3)[-1], folder, dest_path,
+            path_meta.get("s3_key", filename), folder, dest_path,
+            subfolder=path_meta.get("subfolder", ""),
         )
         return {
             "filename": filename,
-            "canonical_name": canonical_display_name(filename),
             "original_filename": original_filename,
             "already_indexed": True,
             "chunks": 0,
-            "s3_uri": s3_uri,
         }
 
     try:
@@ -1320,16 +1421,15 @@ async def upload_document(file: UploadFile = File(...), folder: str = Form("")):
 
     qdrant_service.enrich_document_metadata(
         filename, canonical_display_name(filename),
-        s3_uri.split("/", 3)[-1], folder, dest_path,
+        path_meta.get("s3_key", filename), folder, dest_path,
+        subfolder=path_meta.get("subfolder", ""),
     )
 
     return {
         "filename": filename,
-        "canonical_name": canonical_display_name(filename),
         "original_filename": original_filename,
         "already_indexed": False,
         "chunks": n_chunks,
-        "s3_uri": s3_uri,
     }
 
 
@@ -1341,7 +1441,7 @@ def summarize_document(filename: str):
     resolved = resolve_filename(filename, settings.PDF_FOLDER) or filename
     if resolved in _summary_cache:
         cached = _summary_cache[resolved]
-        return SummarizeResponse(filename=canonical_display_name(resolved), summary=cached["summary"], questions=cached["questions"])
+        return SummarizeResponse(filename=resolved, summary=cached["summary"], questions=cached["questions"])
 
     try:
         summary = summarize_indexed_document(resolved, qdrant_service, summary_llm)
@@ -1352,7 +1452,7 @@ def summarize_document(filename: str):
 
     questions = generate_suggested_questions(summary_llm, summary, resolved)
     _summary_cache[resolved] = {"summary": summary, "questions": questions}
-    return SummarizeResponse(filename=canonical_display_name(resolved), summary=summary, questions=questions)
+    return SummarizeResponse(filename=resolved, summary=summary, questions=questions)
 
 
 @app.delete("/api/documents/{filename}")
@@ -1406,21 +1506,38 @@ def sync_from_s3():
     embedding_service = get_embedding_service()
     pending = files_needing_ingestion(local_files, qdrant_service)
 
-    indexed = []
-    errors = {}
+    indexed_count = 0
+    error_count = 0
     for filename in pending:
         dest_path = local_read_path(filename)
+        path_meta = document_path_metadata(dest_path)
         try:
-            ingest_document_by_extension(dest_path, embedding_service, qdrant_service)
-            indexed.append(filename)
+            ingest_document_by_extension(
+                dest_path,
+                embedding_service,
+                qdrant_service,
+                folder=path_meta.get("folder", ""),
+            )
+            qdrant_service.enrich_document_metadata(
+                filename,
+                canonical_display_name(filename),
+                path_meta.get("s3_key", filename),
+                folder_name=path_meta.get("folder", ""),
+                local_path=dest_path,
+                subfolder=path_meta.get("subfolder", ""),
+            )
+            indexed_count += 1
         except Exception as exc:
-            errors[filename] = str(exc)
+            error_count += 1
+            logger.warning("Failed to index '%s' during sync: %s", filename, exc)
 
+    # Do not return document inventories to the client — only opaque status.
     return {
-        "downloaded": downloaded,
-        "renamed": renamed,
-        "indexed": indexed,
-        "errors": errors,
+        "ok": True,
+        "downloaded_count": len(downloaded),
+        "renamed_count": len(renamed),
+        "indexed_count": indexed_count,
+        "error_count": error_count,
         "up_to_date": not downloaded and not pending and not renamed,
     }
 
@@ -1633,7 +1750,8 @@ def chat(req: ChatRequest):
                         return ChatResponse(answer=str(exc), type="info")
                     questions = generate_suggested_questions(summary_llm, answer, target)
                     _summary_cache[target] = {"summary": answer, "questions": questions}
-                return ChatResponse(answer=answer, type="summary", filename=canonical_display_name(target), questions=questions)
+                # Use the original S3 filename — never a generated display alias.
+                return ChatResponse(answer=answer, type="summary", filename=target, questions=questions)
 
             q_lower = question.lower()
             all_keywords = [
@@ -1649,29 +1767,31 @@ def chat(req: ChatRequest):
                         all_chunks.extend(chunks)
                 if all_chunks:
                     answer = summary_llm.generate_summary(all_chunks)
-                    questions = generate_suggested_questions(summary_llm, answer, "All Documents")
+                    questions = generate_suggested_questions(summary_llm, answer, "Knowledge Base")
                     return ChatResponse(
-                        answer=answer, type="summary", filename="All Documents", questions=questions
+                        answer=answer, type="summary", filename="", questions=questions
                     )
                 return ChatResponse(
-                    answer="No indexed content found. Please upload and process at least one document first.",
+                    answer="I could not find this information in the indexed knowledge base.",
                     type="info",
                 )
 
             tied = ambiguous_candidates(question, docs)
             if tied:
-                options = ", ".join(tied)
                 return ChatResponse(
                     answer=(
-                        "More than one document shares that unit number. "
-                        f"Please specify which one by its unique id: {options}"
+                        "More than one document matches that request. "
+                        "Please rephrase with more detail about the topic or folder."
                     ),
                     type="info",
                 )
 
-            available = ", ".join(canonical_display_name(doc) for doc in docs) or "none"
             return ChatResponse(
-                answer=f"I couldn't uniquely match that document name. Available documents: {available}",
+                answer=(
+                    "I could not uniquely identify which document you mean. "
+                    "Please ask about the topic directly, or name the original file "
+                    "if you already know it."
+                ),
                 type="info",
             )
 

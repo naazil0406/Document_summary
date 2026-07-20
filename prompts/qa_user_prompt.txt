@@ -1,0 +1,12 @@
+User Question:
+{user_question}
+
+Retrieved Context:
+{retrieved_chunks}
+
+Answer using ONLY the retrieved context above.
+
+Cite only documents that contributed to this answer.
+Use each document's original filename, folder, and subfolder exactly as provided.
+Do not list unrelated documents, folder inventories, or S3 storage details.
+When sources are included, end with a Sources section (document name, folder path, page numbers).

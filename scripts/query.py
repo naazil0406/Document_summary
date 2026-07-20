@@ -25,7 +25,7 @@ from config.settings import settings
 from services.embeddings import EmbeddingService
 from services.qdrant_db import QdrantService
 from services.retriever import Retriever, SUMMARY_KEYWORDS
-from services.openrouter_llm import OpenRouterLLMService
+from services.llm_service import OpenRouterLLMService, FALLBACK_ANSWER
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +110,7 @@ def answer_question(
         return "An error occurred while retrieving relevant information."
 
     if not chunks:
-        return "The information is not available in the provided documents."
+        return FALLBACK_ANSWER
 
     # Route to the correct LLM method based on intent
     is_summary = _is_summary_question(normalized_question)

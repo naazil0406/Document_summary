@@ -30,7 +30,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 logger = logging.getLogger(__name__)
 
 FALLBACK_ANSWER = (
-    "The information is not available in the provided documents."
+    "I could not find this information in the indexed knowledge base."
 )
 
 OPENROUTER_CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -112,6 +112,10 @@ _PRESENTATION_USER_PROMPT_PATH = _resolve_prompt_path(
 
 _EXCEL_RESTRUCTURING_SYSTEM_PROMPT_PATH = os.path.join(
     _PROMPTS_DIR, "excel_restructuring_system_prompt.txt"
+)
+
+_SEMANTIC_BOUNDARY_DETECTION_SYSTEM_PROMPT_PATH = os.path.join(
+    _PROMPTS_DIR, "semantic_boundary_detection_system_prompt.txt"
 )
 
 _IMAGE_PROMPT_SYSTEM_PROMPT_PATH = os.path.join(
@@ -240,6 +244,10 @@ def load_excel_restructuring_system_prompt() -> str:
     return _load_prompt_template(_EXCEL_RESTRUCTURING_SYSTEM_PROMPT_PATH)
 
 
+def load_semantic_boundary_detection_system_prompt() -> str:
+    return _load_prompt_template(_SEMANTIC_BOUNDARY_DETECTION_SYSTEM_PROMPT_PATH)
+
+
 def load_image_prompt_system_prompt() -> str:
     return _load_prompt_template(_IMAGE_PROMPT_SYSTEM_PROMPT_PATH)
 
@@ -267,30 +275,67 @@ def random_story_seed() -> Tuple[str, str]:
 
 
 def format_context(chunks: List[dict]) -> str:
-    """Flatten retrieved chunks into the '[1] Source:...\\nPage:...\\n<text>'
-    block format every prompt's {retrieved_chunks} placeholder expects."""
+    """Format retrieved chunks for the Q&A prompt with full source metadata."""
     if not chunks:
         return "No relevant context found."
 
     formatted = []
     for i, chunk in enumerate(chunks, start=1):
-        # Include any stored metadata (author, title, etc.) so the LLM
-        # can answer metadata queries even if that information isn't in
-        # the chunk text itself.
         meta = chunk.get("metadata") or {}
-        meta_str = ""
-        if isinstance(meta, dict) and meta:
-            items = [f"{k}: {v}" for k, v in meta.items() if v is not None and str(v).strip()]
-            if items:
-                meta_str = "Metadata: " + " | ".join(items) + "\n"
+        if not isinstance(meta, dict):
+            meta = {}
 
-        formatted.append(
-            f"[{i}]\n"
-            f"Source: {chunk.get('filename', 'unknown')}\n"
-            f"Page: {chunk.get('page_label', 'N/A')}\n"
-            f"{meta_str}\n"
-            f"{chunk.get('text', '').strip()}"
+        filename = (
+            chunk.get("filename")
+            or meta.get("original_filename")
+            or meta.get("filename")
+            or "unknown"
         )
+        folder = chunk.get("folder") or meta.get("folder") or ""
+        subfolder = chunk.get("subfolder") or meta.get("subfolder") or ""
+        s3_key = chunk.get("s3_key") or meta.get("s3_key") or ""
+        content_type = meta.get("content_type") or chunk.get("content_type") or "paragraph"
+
+        heading_path = meta.get("heading_path") or chunk.get("heading_path") or []
+        if isinstance(heading_path, list) and heading_path:
+            heading_hierarchy = " > ".join(str(part) for part in heading_path if part)
+        else:
+            heading_hierarchy = chunk.get("page_label") or meta.get("toc_section") or "N/A"
+
+        page_start = chunk.get("page_start", meta.get("page_start"))
+        page_end = chunk.get("page_end", meta.get("page_end"))
+        if page_start is not None and page_end is not None and page_start != page_end and page_start != -1:
+            page_numbers = f"{page_start}-{page_end}"
+        elif page_start is not None and page_start != -1:
+            page_numbers = str(page_start)
+        else:
+            page_numbers = chunk.get("page_label", "N/A")
+
+        folder_path = "/".join(part for part in (folder, subfolder) if part)
+
+        lines = [
+            f"[{i}]",
+            f"Document: {filename}",
+        ]
+        if folder:
+            lines.append(f"Folder: {folder}")
+        if subfolder:
+            lines.append(f"Subfolder: {subfolder}")
+        if folder_path:
+            lines.append(f"Folder path: {folder_path}")
+        if s3_key:
+            lines.append(f"S3 key: {s3_key}")
+        lines.extend(
+            [
+                f"Heading hierarchy: {heading_hierarchy}",
+                f"Page: {page_numbers}",
+                f"Content type: {content_type}",
+                "",
+                chunk.get("text", "").strip(),
+            ]
+        )
+        formatted.append("\n".join(lines))
+
     return "\n\n---\n\n".join(formatted)
 
 
