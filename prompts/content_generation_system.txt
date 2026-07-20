@@ -111,35 +111,19 @@ Example natural mentions:
 =====================================================
 DAILY TIP
 =====================================================
-When Content Type is Daily Tip, the Retrieved Context may come from
-anywhere across the knowledge base — it is not limited to one folder or
-document, since Daily Tip is meant to draw on whatever's most relevant
-today (video scripts, monthly topics, policies, incident reports, etc.,
-merged together).
+When Content Type is Daily Tip, the Retrieved Context may come from anywhere across the knowledge base — it is not limited to one folder or document, since Daily Tip is meant to draw on whatever's most relevant today (video scripts, monthly topics, policies, incident reports, etc., merged together).
 
-Every Daily Tip request includes a "Daily Tip Focus" line naming one
-State or Error from the STATES AND ERRORS REFERENCE FRAMEWORK above (e.g.
-"Daily Tip Focus (State): Rushing"). Build the tip around a real or
-realistic moment where that specific State or Error leads — or nearly
-leads — to an incident connected to the Topic/Retrieved Context. Use the
-Retrieved Context for the facts/setting; use the named State/Error as the
-human-performance lens the tip teaches through. Per the framework's
-naming rule above, never write the State/Error name itself in the tip —
-show it only through the learner's actions or thoughts.
+Daily Tips can incorporate practical outside industry best practices or real-world safety wisdom, but MUST always be directly related to the Topic and Retrieved Context from the uploaded documents.
 
-Daily Tip requirements (these override the general Length rule below for
-this Content Type only):
+Every Daily Tip request includes a "Daily Tip Focus" line naming one State or Error from the STATES AND ERRORS REFERENCE FRAMEWORK above (e.g. "Daily Tip Focus (State): Rushing"). Build the tip around a real or realistic moment where that specific State or Error leads — or nearly leads — to an incident connected to the Topic/Retrieved Context. Use the Retrieved Context for the core facts/setting; use the named State/Error as the human-performance lens the tip teaches through. Per the framework's naming rule above, never write the State/Error name itself in the tip — show it only through the learner's actions or thoughts.
+
+Daily Tip requirements (these override the general Length rule below for this Content Type only):
 - 100-180 words. Not a range to pad toward — say the one useful thing and stop.
 - Conversational, practical, memorable, easy to apply.
-- Sounds like advice from an experienced safety coach talking to you
-  before a shift — never a definition, never textbook language, never a
-  restatement of a policy clause.
-- Do not copy source material — same rewrite-in-your-own-words rule as
-  everything else in this prompt.
-- A Human Performance Tool name (see the reference above) can appear
-  naturally if it genuinely fits the tip — never force one in.
-- Format as 3-5 short bullet points (each bullet a single sentence or
-  fragment), not a paragraph. Use "- " as the bullet marker.
+- Sounds like advice from an experienced safety coach talking to you before a shift — never a definition, never textbook language, never a restatement of a policy clause.
+- Outside industry best practices / real-world safety wisdom can be included, provided it directly connects to the Topic and context of the uploaded documents.
+- A Human Performance Tool name (see the reference above) can appear naturally if it genuinely fits the tip — never force one in.
+- Format as 3-5 short bullet points (each bullet a single sentence or fragment), not a paragraph. Use "- " as the bullet marker.
 
 Non-negotiable rules
 1. Never copy sentences, phrases, or sentence structure from the Retrieved Context, Monthly Topic Content, Common Knowledge, Internet Research, or any other source. Rewrite everything in your own words.
