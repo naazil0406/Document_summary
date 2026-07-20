@@ -66,8 +66,7 @@ from services.document_resolver import (  # noqa: E402
     resolve_summary_request,
     ambiguous_candidates,
 )
-from services.canonical_naming import canonical_filename, is_canonical  # noqa: E402
-from services import name_mapping  # noqa: E402
+from services.canonical_naming import canonical_display_name  # noqa: E402
 
 
 # ===========================================================================
@@ -202,7 +201,19 @@ def resolve_filename(name: str, pdf_folder: str):
         ]
     except OSError:
         return None
-    return resolve_pdf_reference(name, candidates)
+    resolved = resolve_pdf_reference(name, candidates)
+    if resolved:
+        return resolved
+    normalized = " ".join(re.findall(r"[a-z0-9]+", name.lower()))
+    matches = [
+        candidate for candidate in candidates
+        if " ".join(re.findall(r"[a-z0-9]+", canonical_display_name(candidate).lower())) in normalized
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def display_name(filename: str) -> str:
+    return canonical_display_name(filename)
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +290,16 @@ def parse_and_chunk(
 # ---------------------------------------------------------------------------
 def _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service) -> None:
     """Embed and persist bounded batches to keep large documents memory-safe."""
+    filename = chunks[0].filename
+    for chunk in chunks:
+        metadata = dict(chunk.metadata or {})
+        metadata.update({
+            "original_filename": filename,
+            "canonical_name": canonical_display_name(filename),
+            "s3_key": metadata.get("s3_key", filename),
+            "local_path": os.path.join(settings.PDF_FOLDER, filename),
+        })
+        chunk.metadata = metadata
     batch_size = max(1, settings.INDEX_BATCH_SIZE)
     first_batch = chunks[:batch_size]
     if not first_batch:
@@ -645,35 +666,7 @@ with st.sidebar:
                 with st.spinner("Fetching documents from S3..."):
                     downloaded = s3_storage.sync_down(settings.PDF_FOLDER)
 
-                # Anything landing locally from S3 might still carry a raw,
-                # non-canonical name (e.g. someone dropped a file straight
-                # into the bucket). Rename those to canonical form --
-                # locally and in Qdrant if already indexed under the old
-                # name -- before deciding what still needs ingestion. The
-                # S3 object itself is left untouched under its original
-                # name; the mapping records that name so it can still be
-                # found later even though the local/display name changed.
                 qdrant_service = get_qdrant_service()
-                local_files = [
-                    f for f in os.listdir(settings.PDF_FOLDER) if f.lower().endswith(SUPPORTED_EXTENSIONS)
-                ]
-                renamed = {}
-                for old_name in local_files:
-                    if is_canonical(old_name):
-                        continue
-                    new_name = canonical_filename(old_name)
-                    old_path = os.path.join(settings.PDF_FOLDER, old_name)
-                    new_path = os.path.join(settings.PDF_FOLDER, new_name)
-                    try:
-                        os.rename(old_path, new_path)
-                        qdrant_service.rename_document(old_name, new_name)
-                        name_mapping.rename_local(settings.PDF_FOLDER, old_name, new_name)
-                        renamed[old_name] = new_name
-                    except Exception as exc:
-                        st.warning(f"Could not rename '{old_name}' to canonical form: {exc}", icon="⚠️")
-                if renamed:
-                    st.toast(f"Renamed {len(renamed)} document(s) to canonical form.", icon="🏷️")
-
                 local_files = [
                     f for f in os.listdir(settings.PDF_FOLDER) if f.lower().endswith(SUPPORTED_EXTENSIONS)
                 ]
@@ -716,11 +709,10 @@ with st.sidebar:
 
     if uploaded_file is not None:
         if st.button("Process", type="primary", use_container_width=True):
-            # Rename to canonical "Unit N - 123456.ext" form up front, so the
-            # name used for local storage, S3, ingestion, and Qdrant is
-            # always unambiguous -- never the raw uploaded name.
-            canonical_name = canonical_filename(uploaded_file.name)
-            dest_path = os.path.join(settings.PDF_FOLDER, canonical_name)
+            # The upload name is the storage identity in both local cache and
+            # S3. Canonical names are display metadata only.
+            original_filename = os.path.basename(uploaded_file.name)
+            dest_path = os.path.join(settings.PDF_FOLDER, original_filename)
 
             with open(dest_path, "wb") as f:
                 f.write(uploaded_file.getbuffer())
@@ -733,30 +725,23 @@ with st.sidebar:
             # a file can exist locally but have never made it into Qdrant
             # (e.g. a previous ingestion attempt failed, or the collection
             # was reset), in which case it still needs to be chunked.
-            already_ingested = canonical_name not in files_needing_ingestion(
-                [canonical_name], qdrant_service
+            already_ingested = original_filename not in files_needing_ingestion(
+                [original_filename], qdrant_service
             )
 
             if s3_storage:
                 try:
-                    # Upload under the ORIGINAL filename, not the canonical
-                    # one -- the bucket keeps whatever name the file
-                    # arrived under. `canonical_name` is what's used
-                    # locally and in the UI; the mapping lets us find the
-                    # object back in S3 later (e.g. to delete it) even
-                    # though the two names differ.
-                    s3_uri = s3_storage.upload_file(dest_path, uploaded_file.name)
-                    name_mapping.set_s3_key(settings.PDF_FOLDER, canonical_name, uploaded_file.name)
-                    st.toast(f"Backed up to {s3_uri}", icon="📦")
+                    if s3_storage.file_exists(original_filename):
+                        st.info("This filename already exists in S3; using the existing authoritative object.", icon="ℹ️")
+                    else:
+                        s3_uri = s3_storage.upload_file(dest_path, original_filename)
+                        st.toast(f"Backed up to {s3_uri}", icon="📦")
                 except Exception as exc:
                     st.warning(f"Saved locally, but S3 upload failed: {exc}", icon="⚠️")
 
-            if canonical_name != uploaded_file.name:
-                st.caption(f"Saved as '{canonical_name}' (from '{uploaded_file.name}').")
-
             try:
                 if not already_ingested:
-                    with st.spinner(f"Reading and indexing '{canonical_name}'..."):
+                    with st.spinner(f"Reading and indexing '{display_name(original_filename)}'..."):
                         n_chunks = ingest_document_by_extension(
                             dest_path, embedding_service, qdrant_service
                         )
@@ -764,12 +749,12 @@ with st.sidebar:
                         st.error("No extractable content found in this document.")
                         st.stop()
                     st.success(
-                        f"Indexed {n_chunks} chunks from '{canonical_name}'. "
+                        f"Indexed {n_chunks} chunks from '{display_name(original_filename)}'. "
                         "Ask a question or request a summary in the chat below.",
                         icon="✅",
                     )
                 else:
-                    st.info(f"'{canonical_name}' is already indexed.", icon="ℹ️")
+                    st.info(f"'{display_name(original_filename)}' is already indexed.", icon="ℹ️")
             except Exception as exc:
                 st.error(f"Something went wrong while processing the document: {exc}")
 
@@ -777,8 +762,10 @@ with st.sidebar:
     if existing:
         st.divider()
         st.header("📚 Previously uploaded")
-        pick = st.selectbox("Re-summarize an existing document", ["—"] + existing)
-        if pick != "—" and st.button("Summarize selected", use_container_width=True):
+        display_to_filename = {display_name(filename): filename for filename in existing}
+        pick_display = st.selectbox("Re-summarize an existing document", ["—"] + sorted(display_to_filename))
+        pick = display_to_filename.get(pick_display)
+        if pick and st.button("Summarize selected", use_container_width=True):
             # Use cached summary if available — skip Qdrant + LLM entirely
             if pick in st.session_state.summary_cache:
                 cached = st.session_state.summary_cache[pick]
@@ -858,7 +845,7 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 if st.session_state.summary_text:
     with st.container(border=True):
-        st.subheader(f"🧾 Summary — {st.session_state.summary_filename}")
+        st.subheader(f"🧾 Summary — {display_name(st.session_state.summary_filename)}")
         st.write(st.session_state.summary_text)
 
         if st.session_state.suggested_questions:
@@ -910,11 +897,13 @@ if question_to_answer:
         with st.spinner("Thinking..."):
             try:
                 if is_summary_question(question_to_answer):
-                    target = resolve_summary_request(
-                        question_to_answer,
-                        _existing_documents(),
-                        st.session_state.summary_filename,
-                    )
+                    target = resolve_filename(question_to_answer, settings.PDF_FOLDER)
+                    if not target:
+                        target = resolve_summary_request(
+                            question_to_answer,
+                            _existing_documents(),
+                            st.session_state.summary_filename,
+                        )
                     if target:
                         # ✅ Check cache first — no Qdrant scroll or LLM call needed
                         if target in st.session_state.summary_cache:
@@ -970,7 +959,7 @@ if question_to_answer:
                                     f"Please specify which one by its unique id: {options}"
                                 )
                             else:
-                                available = ", ".join(existing) or "none"
+                                available = ", ".join(display_name(item) for item in existing) or "none"
                                 answer = (
                                     "I couldn't uniquely match that document name. "
                                     f"Available documents: {available}"

@@ -129,7 +129,7 @@ show it only through the learner's actions or thoughts.
 
 Daily Tip requirements (these override the general Length rule below for
 this Content Type only):
-- 40-80 words. Not a range to pad toward — say the one useful thing and stop.
+- 100-180 words. Not a range to pad toward — say the one useful thing and stop.
 - Conversational, practical, memorable, easy to apply.
 - Sounds like advice from an experienced safety coach talking to you
   before a shift — never a definition, never textbook language, never a
@@ -138,6 +138,7 @@ this Content Type only):
   everything else in this prompt.
 - A Human Performance Tool name (see the reference above) can appear
   naturally if it genuinely fits the tip — never force one in.
+- Be in bullet points
 
 Non-negotiable rules
 1. Never copy sentences, phrases, or sentence structure from the Retrieved Context, Monthly Topic Content, Common Knowledge, Internet Research, or any other source. Rewrite everything in your own words.
@@ -145,7 +146,7 @@ Non-negotiable rules
 3. Every generation must be unique — even for the same Content Type and Topic run twice, vary the angle, example, or phrasing.
 4. Tone: engaging, conversational, easy to understand, mobile-reading friendly. Never sound like a textbook or a course-notes excerpt.
 5. Reinforce previously learned concepts rather than introducing unrelated new material.
-6. Length: minimum 50 words, maximum 80 words, and never exceed 100 words. This applies to the full output (all parts combined, e.g. both sides of a Flashcard).
+6. Length: minimum 100 words, maximum 180 words. This applies to the full output (all parts combined, e.g. both sides of a Flashcard).
 7. If the Retrieved Context does not actually cover the Topic, say so plainly in one short sentence instead of inventing content.
 
 Output Format

@@ -194,6 +194,28 @@ class S3Storage:
 
         return sorted(filenames)
 
+    def list_objects(self) -> List[dict]:
+        """Return authoritative S3 objects with their complete keys.
+
+        Unlike :meth:`list_files`, this preserves folder information and is
+        therefore safe when two folders contain the same basename.
+        """
+        objects: dict[str, dict] = {}
+        paginator = self.client.get_paginator("list_objects_v2")
+        for prefix in self._all_prefixes():
+            for page in paginator.paginate(Bucket=self.bucket_name, Prefix=prefix):
+                for obj in page.get("Contents", []):
+                    key = obj["Key"]
+                    if key == prefix or key.endswith("/"):
+                        continue
+                    objects[key] = {
+                        "key": key,
+                        "filename": os.path.basename(key),
+                        "folder_name": os.path.dirname(key).strip("/"),
+                        "upload_date": obj.get("LastModified").isoformat() if obj.get("LastModified") else "",
+                    }
+        return [objects[key] for key in sorted(objects)]
+
     def rename_file(self, old_filename: str, new_filename: str) -> None:
         """Rename an object in S3 by copying it to the new key and deleting
         the old one (S3 has no atomic rename). Used by the canonical naming
@@ -234,11 +256,9 @@ class S3Storage:
         os.makedirs(local_folder, exist_ok=True)
         downloaded: List[str] = []
 
-        for filename in self.list_files():
-            key = self._find_key(filename)
-            if key is None:
-                continue
-            subfolder = key[: len(key) - len(filename)].strip("/")
+        for obj in self.list_objects():
+            filename, key = obj["filename"], obj["key"]
+            subfolder = obj["folder_name"]
             local_dir = os.path.join(local_folder, subfolder) if subfolder else local_folder
             os.makedirs(local_dir, exist_ok=True)
             local_path = os.path.join(local_dir, filename)

@@ -53,7 +53,8 @@ from services.document_resolver import (
     resolve_summary_request,
     ambiguous_candidates,
 )
-from services.canonical_naming import canonical_filename, is_canonical, current_month_folder
+from services.canonical_naming import canonical_display_name, current_month_folder, parse_canonical, unique_id_for
+from services import name_mapping
 from services.image_generation_service import HuggingFaceFluxService, PollinationsImageService, NovaCanvasService
 
 logger = logging.getLogger(__name__)
@@ -304,9 +305,72 @@ def local_write_path(filename: str) -> str:
     return os.path.join(month_dir, filename)
 
 
+def reconcile_local_names_with_s3(s3_storage: S3Storage, qdrant_service: QdrantService) -> dict:
+    """Rename known legacy local aliases to their authoritative S3 names.
+
+    The old Streamlit implementation recorded local-canonical -> S3-original
+    mappings in ``.s3_name_map.json``.  Consume those mappings before a sync
+    so the cache is repaired in place rather than downloading a duplicate.
+    S3 objects and Qdrant vectors are never recreated or moved.
+    """
+    aliases = name_mapping._load(settings.PDF_FOLDER)
+    renamed = {}
+    for obj in s3_storage.list_objects():
+        filename, key = obj["filename"], obj["key"]
+        local_dir = os.path.join(settings.PDF_FOLDER, obj["folder_name"]) if obj["folder_name"] else settings.PDF_FOLDER
+        target = os.path.join(local_dir, filename)
+        if os.path.isfile(target):
+            continue
+        candidates = [
+            local_name for local_name, s3_name in aliases.items()
+            if s3_name == filename and os.path.isfile(local_read_path(local_name))
+        ]
+        if not candidates:
+            # Earlier canonical migration runs embedded a deterministic id
+            # in the local alias but did not always save .s3_name_map.json.
+            # That id is derived from the original S3 filename, making this
+            # a safe one-to-one fallback (also require the same extension).
+            expected_id = unique_id_for(filename)
+            candidates = [
+                local_name for local_name in existing_documents()
+                if (info := parse_canonical(local_name))
+                and info.unique_id == expected_id
+                and os.path.splitext(local_name)[1].lower() == os.path.splitext(filename)[1].lower()
+            ]
+        if len(candidates) != 1:
+            continue  # Unknown aliases are intentionally not guessed.
+        old_name = candidates[0]
+        old_path = local_read_path(old_name)
+        try:
+            os.makedirs(local_dir, exist_ok=True)
+            os.replace(old_path, target)
+            qdrant_service.rename_document(old_name, filename)
+            qdrant_service.enrich_document_metadata(
+                filename, canonical_display_name(filename), key, obj["folder_name"], target, obj["upload_date"]
+            )
+            name_mapping.remove(settings.PDF_FOLDER, old_name)
+            renamed[old_name] = filename
+        except Exception as exc:
+            logger.warning("Could not reconcile local '%s' with S3 '%s': %s", old_name, key, exc)
+    return renamed
+
+
 def resolve_filename(name: str, pdf_folder: str):
     candidates = _list_all_documents(pdf_folder)
-    return resolve_pdf_reference(name, candidates)
+    # During the one-time local/S3 migration, local aliases may still be
+    # legacy ``Unit1 - 123456`` names. Include the persisted S3 originals in
+    # matching, then return the local/Qdrant identity for retrieval.
+    aliases = name_mapping._load(pdf_folder)
+    s3_to_local = {s3_name: local_name for local_name, s3_name in aliases.items()}
+    resolved = resolve_pdf_reference(name, candidates + list(s3_to_local))
+    if resolved:
+        return s3_to_local.get(resolved, resolved)
+    normalized = " ".join(re.findall(r"[a-z0-9]+", name.lower()))
+    matches = [
+        filename for filename in candidates
+        if " ".join(re.findall(r"[a-z0-9]+", canonical_display_name(filename).lower())) in normalized
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 def _tag_folder(chunks: Optional[List[Chunk]], folder: str) -> Optional[List[Chunk]]:
@@ -391,6 +455,16 @@ def parse_and_chunk(
 
 
 def _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service) -> None:
+    filename = chunks[0].filename
+    for chunk in chunks:
+        metadata = dict(chunk.metadata or {})
+        metadata.update({
+            "original_filename": filename,
+            "canonical_name": canonical_display_name(filename),
+            "s3_key": metadata.get("s3_key", filename),
+            "local_path": local_read_path(filename),
+        })
+        chunk.metadata = metadata
     batch_size = max(1, settings.INDEX_BATCH_SIZE)
     first_batch = chunks[:batch_size]
     if not first_batch:
@@ -427,6 +501,7 @@ def ingest_single_pdf(file_path: str, embedding_service, qdrant_service, folder:
             "page_start": entry.page_start,
             "page_end": entry.page_end,
             "filename": filename,
+            "canonical_name": canonical_display_name(filename),
         }
         for entry in parser.toc_map.get(filename, [])
     ]
@@ -1167,7 +1242,10 @@ def status():
 
 @app.get("/api/documents")
 def list_documents():
-    return {"documents": existing_documents()}
+    return {"documents": [
+        {"original_filename": filename, "canonical_name": canonical_display_name(filename)}
+        for filename in existing_documents()
+    ]}
 
 
 @app.post("/api/documents/upload")
@@ -1183,10 +1261,9 @@ async def upload_document(file: UploadFile = File(...), folder: str = Form("")):
     if ext not in SUPPORTED_EXTENSIONS:
         raise HTTPException(400, f"Unsupported file type '{ext}'.")
 
-    # Rename to canonical "Unit N - 123456.ext" form up front, so the
-    # filename used for local storage, S3, ingestion, and Qdrant is always
-    # unambiguous -- never the raw uploaded name.
-    filename = canonical_filename(original_filename)
+    # The original upload name is the storage identity locally and in S3.
+    # ``canonical_name`` is metadata/UI-only and is never used as a path.
+    filename = original_filename
 
     dest_path = local_write_path(filename)
     contents = await file.read()
@@ -1203,13 +1280,21 @@ async def upload_document(file: UploadFile = File(...), folder: str = Form("")):
     s3_storage = get_s3_storage()
     if s3_storage:
         try:
+            # A deliberate user upload is the one case that may update an
+            # existing key. Migration/sync never upload or alter S3 objects.
             s3_uri = s3_storage.upload_file(dest_path, filename)
         except Exception as exc:
             s3_warning = f"Saved locally, but S3 upload failed: {exc}"
 
     if already_ingested:
+        if s3_uri:
+            qdrant_service.enrich_document_metadata(
+                filename, canonical_display_name(filename),
+                s3_uri.split("/", 3)[-1], folder, dest_path,
+            )
         return {
             "filename": filename,
+            "canonical_name": canonical_display_name(filename),
             "original_filename": original_filename,
             "already_indexed": True,
             "chunks": 0,
@@ -1225,8 +1310,15 @@ async def upload_document(file: UploadFile = File(...), folder: str = Form("")):
     if n_chunks == 0:
         raise HTTPException(422, "No extractable content found in this document.")
 
+    if s3_uri:
+        qdrant_service.enrich_document_metadata(
+            filename, canonical_display_name(filename),
+            s3_uri.split("/", 3)[-1], folder, dest_path,
+        )
+
     return {
         "filename": filename,
+        "canonical_name": canonical_display_name(filename),
         "original_filename": original_filename,
         "already_indexed": False,
         "chunks": n_chunks,
@@ -1243,10 +1335,10 @@ def summarize_document(filename: str):
     resolved = resolve_filename(filename, settings.PDF_FOLDER) or filename
     if resolved in _summary_cache:
         cached = _summary_cache[resolved]
-        return SummarizeResponse(filename=resolved, summary=cached["summary"], questions=cached["questions"])
+        return SummarizeResponse(filename=canonical_display_name(resolved), summary=cached["summary"], questions=cached["questions"])
 
     try:
-        summary = summarize_indexed_document(filename, qdrant_service, summary_llm)
+        summary = summarize_indexed_document(resolved, qdrant_service, summary_llm)
     except ValueError as exc:
         raise HTTPException(404, str(exc))
     except Exception as exc:
@@ -1254,7 +1346,7 @@ def summarize_document(filename: str):
 
     questions = generate_suggested_questions(summary_llm, summary, resolved)
     _summary_cache[resolved] = {"summary": summary, "questions": questions}
-    return SummarizeResponse(filename=resolved, summary=summary, questions=questions)
+    return SummarizeResponse(filename=canonical_display_name(resolved), summary=summary, questions=questions)
 
 
 @app.delete("/api/documents/{filename}")
@@ -1297,35 +1389,12 @@ def sync_from_s3():
     if not s3_storage:
         raise HTTPException(400, "S3 is not configured (set S3_BUCKET_NAME in .env).")
 
+    qdrant_service = get_qdrant_service()
     try:
+        renamed = reconcile_local_names_with_s3(s3_storage, qdrant_service)
         downloaded = s3_storage.sync_down(settings.PDF_FOLDER)
     except Exception as exc:
         raise HTTPException(502, f"Could not sync from S3: {exc}")
-
-    # Anything landing in the local folder from S3 might still carry a raw,
-    # non-canonical name (e.g. someone dropped a file straight into the
-    # bucket). Rename those to canonical form -- locally, in S3, and in
-    # Qdrant if it was already indexed under the old name -- before deciding
-    # what still needs ingestion.
-    qdrant_service = get_qdrant_service()
-    renamed = {}
-    for filename in list(existing_documents()):
-        if is_canonical(filename):
-            continue
-        new_name = canonical_filename(filename)
-        old_path = local_read_path(filename)
-        # Rename in place -- keep whatever month subfolder it's already in
-        # rather than moving it to the current month.
-        new_path = os.path.join(os.path.dirname(old_path), new_name)
-        try:
-            os.rename(old_path, new_path)
-            s3_storage.rename_file(filename, new_name)
-            qdrant_service.rename_document(filename, new_name)
-            renamed[filename] = new_name
-            if filename in downloaded:
-                downloaded[downloaded.index(filename)] = new_name
-        except Exception as exc:
-            logger.warning("Could not rename '%s' to canonical form: %s", filename, exc)
 
     local_files = existing_documents()
     embedding_service = get_embedding_service()
@@ -1543,7 +1612,9 @@ def chat(req: ChatRequest):
     try:
         if is_summary_question(question):
             docs = existing_documents()
-            target = resolve_summary_request(question, docs, None)
+            target = resolve_filename(question, settings.PDF_FOLDER)
+            if not target:
+                target = resolve_summary_request(question, docs, None)
 
             if target:
                 if target in _summary_cache:
@@ -1556,7 +1627,7 @@ def chat(req: ChatRequest):
                         return ChatResponse(answer=str(exc), type="info")
                     questions = generate_suggested_questions(summary_llm, answer, target)
                     _summary_cache[target] = {"summary": answer, "questions": questions}
-                return ChatResponse(answer=answer, type="summary", filename=target, questions=questions)
+                return ChatResponse(answer=answer, type="summary", filename=canonical_display_name(target), questions=questions)
 
             q_lower = question.lower()
             all_keywords = [
@@ -1592,13 +1663,25 @@ def chat(req: ChatRequest):
                     type="info",
                 )
 
-            available = ", ".join(docs) or "none"
+            available = ", ".join(canonical_display_name(doc) for doc in docs) or "none"
             return ChatResponse(
                 answer=f"I couldn't uniquely match that document name. Available documents: {available}",
                 type="info",
             )
 
-        answer = answer_question(retriever, qa_llm, summary_llm, question)
+        # A document name in a normal Q&A prompt (not only "summarize")
+        # scopes retrieval to that one document. This recognizes both the
+        # S3 original name and the UI's canonical display name.
+        target = resolve_filename(question, settings.PDF_FOLDER)
+        if target:
+            chunks = _get_all_chunks(target, qdrant_service)
+            if not chunks:
+                return ChatResponse(
+                    answer="No indexed content was found for that document.", type="info"
+                )
+            answer = qa_llm.generate_answer(chunks, question)
+        else:
+            answer = answer_question(retriever, qa_llm, summary_llm, question)
         return ChatResponse(answer=answer, type="qa")
     except HTTPException:
         raise

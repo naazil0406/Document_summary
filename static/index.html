@@ -1256,13 +1256,13 @@ button { font-family: inherit; cursor: pointer; }
     }
 
     railDocs.innerHTML = docs.length
-      ? docs.map((d) => `<div class="rail-doc"><span class="rail-doc-name">${escapeHtml(d)}</span><span class="rail-doc-ext">${extOf(d)}</span></div>`).join("")
+      ? docs.map((d) => `<div class="rail-doc"><span class="rail-doc-name">${escapeHtml(d.canonical_name)}</span><span class="rail-doc-ext">${extOf(d.original_filename)}</span></div>`).join("")
       : `<div class="rail-doc-empty">No documents yet.</div>`;
 
     docGrid.innerHTML = docs.length
       ? docs.map((d) => `
-          <div class="doc-card" data-ext="${extOf(d)}" data-filename="${escapeHtml(d)}">
-            <div class="doc-card-name">${escapeHtml(d)}</div>
+          <div class="doc-card" data-ext="${extOf(d.original_filename)}" data-filename="${escapeHtml(d.original_filename)}" data-display-name="${escapeHtml(d.canonical_name)}">
+            <div class="doc-card-name">${escapeHtml(d.canonical_name)}</div>
             <div class="doc-card-actions">
               <button data-action="summarize">Summarize</button>
               <button data-action="delete" class="danger">Remove</button>
@@ -1276,6 +1276,7 @@ button { font-family: inherit; cursor: pointer; }
     if (!btn) return;
     const card = btn.closest(".doc-card");
     const filename = card.dataset.filename;
+    const displayName = card.dataset.displayName;
 
     if (btn.dataset.action === "summarize") {
       btn.disabled = true;
@@ -1291,7 +1292,7 @@ button { font-family: inherit; cursor: pointer; }
         btn.textContent = "Summarize";
       }
     } else if (btn.dataset.action === "delete") {
-      if (!confirm(`Remove "${filename}" from the library?`)) return;
+      if (!confirm(`Remove "${displayName}" from the library?`)) return;
       try {
         await api(`/api/documents/${encodeURIComponent(filename)}`, { method: "DELETE" });
         await refreshDocuments();
@@ -1403,9 +1404,9 @@ button { font-family: inherit; cursor: pointer; }
     try {
       const data = await api("/api/documents/upload", { method: "POST", body: formData });
       if (data.already_indexed) {
-        logLine(uploadLog, `"${data.filename}" is already indexed.`, "info");
+        logLine(uploadLog, `"${data.canonical_name}" is already indexed.`, "info");
       } else {
-        logLine(uploadLog, `Indexed ${data.chunks} chunks from "${data.filename}".`, "ok");
+        logLine(uploadLog, `Indexed ${data.chunks} chunks from "${data.canonical_name}".`, "ok");
       }
       if (data.s3_uri) logLine(uploadLog, `Backed up to ${data.s3_uri}`, "info");
       if (data.s3_warning) logLine(uploadLog, data.s3_warning, "err");

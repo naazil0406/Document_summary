@@ -26,7 +26,6 @@ from services.chunking import Chunk, DocumentChunker, SemanticChunkingService
 from services.embeddings import EmbeddingService
 from services.qdrant_db import QdrantService
 from services.s3_storage import S3Storage
-from services.canonical_naming import canonical_filename, is_canonical
 
 logger = logging.getLogger(__name__)
 
@@ -132,38 +131,6 @@ def sync_from_s3() -> None:
         logger.info("Nothing new to download; local PDF_FOLDER already up to date with S3.")
 
 
-def _rename_to_canonical(folder: str, qdrant_service: QdrantService) -> None:
-    """Rename any non-canonical file in `folder` to "Unit N - 123456.ext"
-    form -- locally, and in Qdrant if it was already indexed under the old
-    name (Qdrant's `filename` payload is what the UI reads). Documents
-    ingested before the canonical naming scheme was introduced get
-    normalized the next time ingestion runs.
-
-    The S3 object is intentionally never renamed here: canonical naming is
-    a local + UI concern only, and S3 keys/filenames stay exactly as they
-    were originally uploaded."""
-    if not os.path.isdir(folder):
-        return
-
-    for old_name in sorted(os.listdir(folder)):
-        old_path = os.path.join(folder, old_name)
-        if not os.path.isfile(old_path):
-            continue
-        if os.path.splitext(old_name)[1].lower() not in SUPPORTED_INGESTION_EXTENSIONS:
-            continue
-        if is_canonical(old_name):
-            continue
-
-        new_name = canonical_filename(old_name)
-        new_path = os.path.join(folder, new_name)
-        try:
-            os.rename(old_path, new_path)
-            qdrant_service.rename_document(old_name, new_name)
-            logger.info("Renamed '%s' -> '%s' (canonical form).", old_name, new_name)
-        except Exception as exc:
-            logger.warning("Could not rename '%s' to canonical form: %s", old_name, exc)
-
-
 def run_ingestion() -> None:
     logger.info("Starting ingestion pipeline.")
 
@@ -179,8 +146,6 @@ def run_ingestion() -> None:
         collection_name=settings.QDRANT_COLLECTION_NAME,
         api_key=settings.QDRANT_API_KEY,
     )
-
-    _rename_to_canonical(settings.PDF_FOLDER, qdrant_service)
 
     ingestable_files = _list_ingestable_files(settings.PDF_FOLDER)
     if not ingestable_files:

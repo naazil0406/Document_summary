@@ -1,25 +1,11 @@
-"""
-One-off migration: rename every already-indexed document to canonical
-"Unit N - 123456.ext" / "Misc - 123456.ext" form.
+"""Migrate local document names to the authoritative Amazon S3 names.
 
-This does NOT re-parse, re-chunk, or re-embed anything, and it does NOT
-touch S3 -- it only:
-  1. renames the local file in PDF_FOLDER (flat, or inside a month
-     subfolder, e.g. PDF_FOLDER/july/<file>)
-  2. updates the `filename` payload field on the document's existing
-     Qdrant points (chunks + TOC entries) in place, so the UI's
-     "Indexed Documents" list shows the new short name
+This command never uploads, downloads, renames, deletes, re-parses, or
+re-embeds documents.  It renames only an already-present local cache file and
+enriches the payload of its existing Qdrant points in place, preserving vector
+IDs and embeddings.  It is safe to run repeatedly.
 
-S3 object keys are left exactly as they are.
-
-Safe to re-run: documents already in fully-shortened canonical form are
-skipped, and the canonical name for a given source file is always the
-same (deterministic hash), so re-running this never produces a different
-name for the same file.
-
-Run with:
-    python -m scripts.migrate_canonical_names
-    python -m scripts.migrate_canonical_names --dry-run
+Run: ``python -m scripts.migrate_canonical_names [--dry-run]``.
 """
 
 import argparse
@@ -30,139 +16,70 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config.settings import settings
+from services.canonical_naming import canonical_display_name
 from services.qdrant_db import QdrantService
-from services.canonical_naming import canonical_filename, is_canonical, reshorten_canonical
+from services.s3_storage import S3Storage
 from services import name_mapping
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_EXTENSIONS = (
-    ".pdf", ".docx", ".xlsx", ".xlsm", ".xls", ".csv", ".pptx",
-    ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff",
-)
 
-
-def _iter_documents(folder: str):
-    """Yield (full_path, filename) for every supported document directly
-    in `folder` (legacy flat layout) or one level down inside a month
-    subfolder (e.g. folder/july/<file>, current layout)."""
-    if not os.path.isdir(folder):
-        return
-    for entry in sorted(os.listdir(folder)):
-        full = os.path.join(folder, entry)
-        if os.path.isfile(full):
-            if os.path.splitext(entry)[1].lower() in SUPPORTED_EXTENSIONS:
-                yield full, entry
-        elif os.path.isdir(full):
-            for sub_entry in sorted(os.listdir(full)):
-                sub_full = os.path.join(full, sub_entry)
-                if os.path.isfile(sub_full) and os.path.splitext(sub_entry)[1].lower() in SUPPORTED_EXTENSIONS:
-                    yield sub_full, sub_entry
+def _mapping(folder: str) -> dict[str, str]:
+    """Read the legacy side table solely to identify old local aliases."""
+    return name_mapping._load(folder)  # compatibility data; no new entries are written
 
 
 def migrate(dry_run: bool = False) -> list[tuple[str, str]]:
-    """Rename every local document (and its Qdrant `filename` payload) to
-    canonical form. S3 is never touched. Handles two cases:
+    if not settings.S3_BUCKET_NAME:
+        raise RuntimeError("S3_BUCKET_NAME is required: S3 is the migration source of truth.")
+    storage = S3Storage(settings.S3_BUCKET_NAME, settings.S3_PREFIX, settings.AWS_REGION,
+                        settings.AWS_ACCESS_KEY_ID, settings.AWS_SECRET_ACCESS_KEY)
+    qdrant = QdrantService(settings.QDRANT_URL, settings.QDRANT_COLLECTION_NAME, settings.QDRANT_API_KEY)
+    aliases = _mapping(settings.PDF_FOLDER)
+    changed: list[tuple[str, str]] = []
 
-      - not yet canonical: assign a fresh "<label> - 123456.ext" name
-      - already canonical but with an old, un-shortened label: reshorten
-        just the label, keeping the existing unique id (and therefore
-        the existing Qdrant points) intact
-
-    Returns the list of (old_name, new_name) pairs that were renamed (or
-    would be, if dry_run).
-    """
-
-    folder = settings.PDF_FOLDER
-    if not os.path.isdir(folder):
-        logger.warning("PDF_FOLDER '%s' does not exist; nothing to migrate.", folder)
-        return []
-
-    qdrant_service = QdrantService(
-        url=settings.QDRANT_URL,
-        collection_name=settings.QDRANT_COLLECTION_NAME,
-        api_key=settings.QDRANT_API_KEY,
-    )
-
-    renamed: list[tuple[str, str]] = []
-
-    for old_path, old_name in _iter_documents(folder):
-        if is_canonical(old_name):
-            new_name = reshorten_canonical(old_name)
-            if new_name == old_name:
-                logger.info("Skipping '%s' (already fully shortened).", old_name)
+    for obj in storage.list_objects():
+        filename, key = obj["filename"], obj["key"]
+        local_dir = os.path.join(settings.PDF_FOLDER, obj["folder_name"]) if obj["folder_name"] else settings.PDF_FOLDER
+        target = os.path.join(local_dir, filename)
+        # Existing exact mirror is a no-op; still enrich vector metadata.
+        old_name = filename
+        if not os.path.isfile(target):
+            aliases_for_key = [local for local, s3_name in aliases.items() if s3_name == filename]
+            candidates = [name for name in aliases_for_key if os.path.isfile(os.path.join(local_dir, name))]
+            if len(candidates) != 1:
+                # Do not guess between same-content/duplicate-looking files.
+                logger.warning("No safe local match for S3 object '%s'; skipped.", key)
                 continue
-        else:
-            new_name = canonical_filename(old_name)
+            old_name = candidates[0]
+            old_path = os.path.join(local_dir, old_name)
+            if dry_run:
+                changed.append((old_name, filename))
+                continue
+            os.makedirs(local_dir, exist_ok=True)
+            os.replace(old_path, target)
+            changed.append((old_name, filename))
+            # Existing points retain IDs/vectors; only their identifying payload changes.
+            qdrant.rename_document(old_name, filename)
+            name_mapping.remove(settings.PDF_FOLDER, old_name)
 
-        new_path = os.path.join(os.path.dirname(old_path), new_name)
-
-        if os.path.exists(new_path):
-            logger.warning(
-                "Skipping '%s': target '%s' already exists locally.",
-                old_name, new_name,
-            )
-            continue
-
-        if dry_run:
-            logger.info("[dry-run] Would rename '%s' -> '%s'.", old_name, new_name)
-            renamed.append((old_name, new_name))
-            continue
-
-        try:
-            os.rename(old_path, new_path)
-            logger.info("Renamed local file '%s' -> '%s'.", old_name, new_name)
-
-            count = qdrant_service.rename_document(old_name, new_name)
-            logger.info(
-                "Re-keyed %d Qdrant point(s) for '%s' -> '%s' (UI will show the new name).",
-                count, old_name, new_name,
+        if not dry_run:
+            qdrant.enrich_document_metadata(
+                filename, canonical_display_name(filename), key, obj["folder_name"], target, obj["upload_date"]
             )
 
-            # S3 keeps the object under `old_name` -- record that mapping
-            # so delete/lookup by the new canonical name can still find it.
-            name_mapping.rename_local(folder, old_name, new_name)
-
-            renamed.append((old_name, new_name))
-        except Exception as exc:
-            logger.error(
-                "Failed to fully migrate '%s' -> '%s': %s. "
-                "Check local/Qdrant state manually before re-running.",
-                old_name, new_name, exc,
-            )
-
-    return renamed
+    return changed
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Show what would be renamed without changing anything.",
-    )
+    parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-
-    renamed = migrate(dry_run=args.dry_run)
-
-    if not renamed:
-        logger.info("Nothing to migrate -- all documents already canonical.")
-        return
-
-    logger.info("=" * 60)
-    logger.info(
-        "%s %d document(s):",
-        "Would rename" if args.dry_run else "Renamed",
-        len(renamed),
-    )
-    for old_name, new_name in renamed:
-        logger.info("  %s  ->  %s", old_name, new_name)
+    logging.basicConfig(level=logging.INFO)
+    renamed = migrate(args.dry_run)
+    logger.info("%s %d local file(s).", "Would rename" if args.dry_run else "Renamed", len(renamed))
+    for old, new in renamed:
+        logger.info("%s -> %s", old, new)
 
 
 if __name__ == "__main__":

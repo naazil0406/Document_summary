@@ -18,6 +18,7 @@ from qdrant_client.http import models as qdrant_models
 
 from config.settings import settings
 from services.chunking import Chunk
+from services.canonical_naming import canonical_display_name
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +69,14 @@ class QdrantService:
                 payload={
                     "type": "chunk",
                     "text": chunk.text,
+                    # filename remains for old callers; it is always the
+                    # original S3/local filename, never the display label.
                     "filename": chunk.filename,
+                    "original_filename": chunk.filename,
+                    "canonical_name": (chunk.metadata or {}).get(
+                        "canonical_name", canonical_display_name(chunk.filename)
+                    ),
+                    "s3_key": (chunk.metadata or {}).get("s3_key", chunk.filename),
                     "page_start": chunk.page_start,
                     "page_end": chunk.page_end,
                     "page_label": chunk.page_label,
@@ -154,6 +162,9 @@ class QdrantService:
                         "page_start": entry["page_start"],
                         "page_end": entry["page_end"],
                         "filename": entry["filename"],
+                        "original_filename": entry["filename"],
+                        "canonical_name": entry.get("canonical_name", canonical_display_name(entry["filename"])),
+                        "s3_key": entry.get("s3_key", entry["filename"]),
                     },
                 )
             )
@@ -514,4 +525,32 @@ class QdrantService:
                 "Failed to rename document '%s' -> '%s' in Qdrant: %s",
                 old_filename, new_filename, exc,
             )
+            raise
+
+    def enrich_document_metadata(
+        self, original_filename: str, canonical_name: str, s3_key: str,
+        folder_name: str = "", local_path: str = "", upload_date: str = "",
+    ) -> int:
+        """Add/repair metadata in place without changing vector IDs or text."""
+        selector = qdrant_models.FilterSelector(filter=qdrant_models.Filter(must=[
+            qdrant_models.FieldCondition(
+                key="filename", match=qdrant_models.MatchValue(value=original_filename)
+            )
+        ]))
+        payload = {
+            "original_filename": original_filename,
+            "canonical_name": canonical_name,
+            "s3_key": s3_key,
+            "folder": folder_name,
+            "local_path": local_path,
+        }
+        if upload_date:
+            payload["upload_date"] = upload_date
+        try:
+            count = self.client.count(collection_name=self.collection_name, count_filter=selector.filter, exact=True).count
+            if count:
+                self.client.set_payload(collection_name=self.collection_name, payload=payload, points=selector, wait=True)
+            return count
+        except Exception as exc:
+            logger.error("Failed to enrich metadata for '%s': %s", original_filename, exc)
             raise
