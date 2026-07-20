@@ -1,6 +1,9 @@
 import os
+import sys
 import tempfile
 from openpyxl import Workbook
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app import parse_and_chunk
 from services.chunking import DocumentChunker

@@ -451,7 +451,24 @@ def parse_and_chunk(
         "min_paragraph_length": settings.DOC_CHUNK_MIN_PARAGRAPH_LENGTH,
     }
 
-    if settings.USE_SEMANTIC_BOUNDARY_DETECTION:
+    if parser and parser.__class__.__name__ == "ExcelParser":
+        chunks = [
+            Chunk(
+                chunk_id=str(uuid.uuid4()),
+                text=p.text,
+                filename=p.filename,
+                page_number=p.page_number,
+                page_label=p.page_label,
+                page_start=p.page_number,
+                page_end=p.page_number,
+                metadata=dict(p.metadata or {}),
+                toc_section=(p.metadata or {}).get("toc_section", ""),
+            )
+            for p in pages
+        ]
+    elif not use_semantic_chunking:
+        chunks = chunk_pages_legacy(pages, embedding_service, **chunk_kwargs)
+    elif settings.USE_SEMANTIC_BOUNDARY_DETECTION:
         chunks = chunk_extracted_pages(pages, embedding_service, **chunk_kwargs)
     else:
         chunks = chunk_pages_legacy(pages, embedding_service, **chunk_kwargs)

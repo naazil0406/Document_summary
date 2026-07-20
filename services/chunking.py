@@ -804,6 +804,7 @@ def chunk_pages_legacy(
     embedding_service=None,
     *,
     use_semantic_chunking: bool = True,
+    folder: str = "",
     heading_max_length: int = 80,
     min_paragraph_length: int = 20,
 ) -> List[Chunk]:
@@ -817,7 +818,7 @@ def chunk_pages_legacy(
         return []
 
     if not use_semantic_chunking or embedding_service is None:
-        return [
+        chunks = [
             Chunk(
                 chunk_id=str(uuid.uuid4()),
                 text=doc_chunk.text,
@@ -831,18 +832,24 @@ def chunk_pages_legacy(
             )
             for doc_chunk in document_chunks
         ]
+    else:
+        from config.settings import settings
 
-    from config.settings import settings
+        semantic_chunker = SemanticChunkingService(
+            embeddings=embedding_service.langchain_embeddings,
+            buffer_size=settings.SEMANTIC_BUFFER_SIZE,
+            breakpoint_threshold_type=settings.SEMANTIC_BREAKPOINT_TYPE,
+            breakpoint_threshold_amount=settings.SEMANTIC_BREAKPOINT_AMOUNT,
+            max_chunk_size=settings.MAX_CHUNK_SIZE,
+            chunk_overlap=settings.CHUNK_OVERLAP,
+        )
+        chunks = semantic_chunker.chunk_documents(document_chunks) or []
 
-    semantic_chunker = SemanticChunkingService(
-        embeddings=embedding_service.langchain_embeddings,
-        buffer_size=settings.SEMANTIC_BUFFER_SIZE,
-        breakpoint_threshold_type=settings.SEMANTIC_BREAKPOINT_TYPE,
-        breakpoint_threshold_amount=settings.SEMANTIC_BREAKPOINT_AMOUNT,
-        max_chunk_size=settings.MAX_CHUNK_SIZE,
-        chunk_overlap=settings.CHUNK_OVERLAP,
-    )
-    return semantic_chunker.chunk_documents(document_chunks) or []
+    if folder:
+        for chunk in chunks:
+            chunk.metadata = dict(chunk.metadata or {})
+            chunk.metadata["folder"] = folder
+    return chunks
 
 
 def chunk_restructured_document(

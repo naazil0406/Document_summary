@@ -15,7 +15,12 @@ import boto3
 
 CACHE_DIR = os.getenv("HF_CACHE_DIR", os.path.join(os.getcwd(), ".hf_cache"))
 
-os.makedirs(CACHE_DIR, exist_ok=True)
+try:
+    os.makedirs(CACHE_DIR, exist_ok=True)
+except (OSError, FileNotFoundError):
+    CACHE_DIR = os.path.join(os.getcwd(), ".hf_cache")
+    os.makedirs(CACHE_DIR, exist_ok=True)
+
 os.environ["HF_HOME"] = CACHE_DIR
 os.environ["HUGGINGFACE_HUB_CACHE"] = os.path.join(CACHE_DIR, "hub")
 os.environ["TRANSFORMERS_CACHE"] = os.path.join(CACHE_DIR, "transformers")

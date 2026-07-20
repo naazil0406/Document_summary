@@ -23,3 +23,8 @@ Narrative_scripts/**
 Generated_images/**
 !Generated_images/
 !Generated_images/.gitkeep
+
+.pytest_cache/
+.hf_cache/
+test.png
+APP_README.md

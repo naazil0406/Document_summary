@@ -1,5 +1,10 @@
 """Unit tests for S3 path metadata parsing and preservation."""
 
+import os
+import sys
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from services.s3_storage import parse_s3_object_path
 
 

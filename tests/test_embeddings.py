@@ -1,7 +1,10 @@
 import importlib
 import json
 import os
+import sys
 from unittest.mock import patch
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def test_embedding_service_uses_bedrock_when_configured(monkeypatch):

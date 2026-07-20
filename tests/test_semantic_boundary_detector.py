@@ -1,6 +1,10 @@
 """Unit tests for the Semantic Boundary Detection engine."""
 
 import json
+import os
+import sys
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from services.semantic_boundary_detector import (
     SemanticBoundaryDetector,
