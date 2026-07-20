@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Chatbot — Document Intelligence</title>
 <style>
+[hidden] { display: none !important; }
 /* ============================================================
    Chatbot — Document Intelligence workspace
    Design tokens
@@ -401,40 +402,8 @@ button { font-family: inherit; cursor: pointer; }
 .summary-card-chips button:hover { border-color: var(--slate); background: rgba(62,92,107,0.06); }
 
 /* ============================================================
-   Upload panel
+   Sync panel logging
    ============================================================ */
-.dropzone {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  border: 1.5px dashed var(--paper-rule);
-  border-radius: var(--radius);
-  padding: 48px 20px;
-  text-align: center;
-  cursor: pointer;
-  background: var(--paper-raised);
-  transition: border-color 0.15s ease, background 0.15s ease;
-}
-.dropzone:hover, .dropzone.is-dragover { border-color: var(--gold); background: #fdf9ec; }
-.dropzone-icon { font-size: 26px; color: var(--gold-deep); font-family: var(--font-display); }
-.dropzone-title { font-weight: 500; font-size: 15px; color: var(--ink); }
-.dropzone-sub { font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-text-soft); }
-
-.upload-pending {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-top: 14px;
-  padding: 10px 14px;
-  background: var(--paper-raised);
-  border: 1px solid var(--paper-rule);
-  border-radius: 8px;
-}
-.upload-pending span { font-family: var(--font-mono); font-size: 13px; }
-
-.upload-log { margin-top: 14px; display: flex; flex-direction: column; gap: 6px; }
 .log-line { font-size: 13px; padding: 8px 12px; border-radius: 7px; }
 .log-line.ok { background: rgba(62,92,107,0.08); color: var(--slate); }
 .log-line.err { background: rgba(163,64,47,0.08); color: var(--danger); }
@@ -956,9 +925,6 @@ button { font-family: inherit; cursor: pointer; }
       <button class="rail-nav-item is-active" data-panel="chat">
         <span class="rail-nav-dot"></span>Chat
       </button>
-      <button class="rail-nav-item" data-panel="upload">
-        <span class="rail-nav-dot"></span>Upload
-      </button>
       <button class="rail-nav-item" data-panel="sync">
         <span class="rail-nav-dot"></span>AWS Sync
       </button>
@@ -1016,38 +982,11 @@ button { font-family: inherit; cursor: pointer; }
       </form>
     </section>
 
-    <!-- ---------- UPLOAD PANEL ---------- -->
-    <section class="panel" id="panel-upload">
-      <header class="panel-head">
-        <h1>Upload a document</h1>
-        <p>PDF, Word, Excel, or CSV. Each file is parsed, chunked, embedded, and indexed for search — then mirrored to S3 if configured.</p>
-      </header>
-
-      <label class="dropzone" id="dropzone" for="fileInput">
-        <input type="file" id="fileInput" accept=".pdf,.docx,.xlsx,.xlsm,.xls,.csv" hidden />
-        <div class="dropzone-icon">＋</div>
-        <div class="dropzone-title">Drop a file here, or click to browse</div>
-        <div class="dropzone-sub">.pdf · .docx · .xlsx · .xlsm · .xls · .csv</div>
-      </label>
-
-      <div class="upload-pending" id="uploadPending" hidden>
-        <span id="uploadPendingName"></span>
-        <button id="uploadPendingBtn" class="primary-btn">Process document</button>
-      </div>
-
-      <div class="upload-log" id="uploadLog"></div>
-
-      <h2 class="section-title">Library</h2>
-      <div class="doc-grid" id="docGrid">
-        <div class="doc-grid-empty">Nothing indexed yet — the first upload starts your library.</div>
-      </div>
-    </section>
-
     <!-- ---------- AWS SYNC PANEL ---------- -->
     <section class="panel" id="panel-sync">
       <header class="panel-head">
         <h1>AWS S3 sync</h1>
-        <p>S3 is the durable copy of your library. Uploads are mirrored there automatically; use this to pull down anything that exists in S3 but isn't on this machine yet.</p>
+        <p>S3 is the source of documents for this system. Add files directly to the bucket, then use Sync to pull down and index anything new.</p>
       </header>
 
       <div class="sync-card">
@@ -1064,7 +1003,12 @@ button { font-family: inherit; cursor: pointer; }
       <div class="hint-card">
         <strong>Not configured?</strong> Set <code>S3_BUCKET_NAME</code> (and optionally
         <code>AWS_ACCESS_KEY_ID</code> / <code>AWS_SECRET_ACCESS_KEY</code>) in <code>.env</code>
-        to enable this. Without it, documents live on local disk only.
+        to enable this.
+      </div>
+
+      <h2 class="section-title">Library</h2>
+      <div class="doc-grid" id="docGrid">
+        <div class="doc-grid-empty">Nothing indexed yet — sync from S3 to populate your library.</div>
       </div>
     </section>
 
@@ -1209,7 +1153,6 @@ button { font-family: inherit; cursor: pointer; }
   const thread = document.getElementById("thread");
   const threadEmpty = document.getElementById("threadEmpty");
   const summaryCard = document.getElementById("summaryCard");
-  const uploadLog = document.getElementById("uploadLog");
   const syncLog = document.getElementById("syncLog");
 
   function addMsg(role, text) {
@@ -1361,64 +1304,6 @@ button { font-family: inherit; cursor: pointer; }
     thread.appendChild(threadEmpty);
     threadEmpty.style.display = "";
     summaryCard.hidden = true;
-  });
-
-  // ---- Upload ----
-  const fileInput = document.getElementById("fileInput");
-  const dropzone = document.getElementById("dropzone");
-  const uploadPending = document.getElementById("uploadPending");
-  const uploadPendingName = document.getElementById("uploadPendingName");
-  const uploadPendingBtn = document.getElementById("uploadPendingBtn");
-
-  fileInput.addEventListener("change", () => {
-    if (fileInput.files[0]) {
-      uploadPendingName.textContent = fileInput.files[0].name;
-      uploadPending.hidden = false;
-    }
-  });
-  ["dragover", "dragenter"].forEach((evt) =>
-    dropzone.addEventListener(evt, (e) => { e.preventDefault(); dropzone.classList.add("is-dragover"); })
-  );
-  ["dragleave"].forEach((evt) =>
-    dropzone.addEventListener(evt, (e) => { e.preventDefault(); dropzone.classList.remove("is-dragover"); })
-  );
-  dropzone.addEventListener("drop", (e) => {
-    e.preventDefault();
-    dropzone.classList.remove("is-dragover");
-    if (e.dataTransfer.files[0]) {
-      fileInput.files = e.dataTransfer.files;
-      fileInput.dispatchEvent(new Event("change"));
-    }
-  });
-
-  uploadPendingBtn.addEventListener("click", async (e) => {
-    e.preventDefault();
-    const file = fileInput.files[0];
-    if (!file) return;
-
-    uploadPendingBtn.disabled = true;
-    uploadPendingBtn.textContent = "Processing…";
-    const formData = new FormData();
-    formData.append("file", file);
-
-    try {
-      const data = await api("/api/documents/upload", { method: "POST", body: formData });
-      if (data.already_indexed) {
-        logLine(uploadLog, `"${data.canonical_name}" is already indexed.`, "info");
-      } else {
-        logLine(uploadLog, `Indexed ${data.chunks} chunks from "${data.canonical_name}".`, "ok");
-      }
-      if (data.s3_uri) logLine(uploadLog, `Backed up to ${data.s3_uri}`, "info");
-      if (data.s3_warning) logLine(uploadLog, data.s3_warning, "err");
-      await refreshDocuments();
-    } catch (exc) {
-      logLine(uploadLog, "Upload failed: " + exc.message, "err");
-    } finally {
-      uploadPendingBtn.disabled = false;
-      uploadPendingBtn.textContent = "Process document";
-      uploadPending.hidden = true;
-      fileInput.value = "";
-    }
   });
 
   // ---- AWS Sync ----

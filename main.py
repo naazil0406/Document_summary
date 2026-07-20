@@ -1261,10 +1261,24 @@ async def upload_document(file: UploadFile = File(...), folder: str = Form("")):
     if ext not in SUPPORTED_EXTENSIONS:
         raise HTTPException(400, f"Unsupported file type '{ext}'.")
 
-    # The original upload name is the storage identity locally and in S3.
-    # ``canonical_name`` is metadata/UI-only and is never used as a path.
+    # Uploads require S3: it is the only supported storage destination now,
+    # not an optional backup. Fail fast rather than accepting a document
+    # that would only ever live on local disk.
+    s3_storage = get_s3_storage()
+    if not s3_storage:
+        raise HTTPException(
+            503,
+            "Document upload requires an S3 bucket, which isn't configured. "
+            "Set S3_BUCKET_NAME (and credentials) and try again.",
+        )
+
+    # The original upload name is the storage identity in S3 (and in the
+    # local working copy below). ``canonical_name`` is metadata/UI-only and
+    # is never used as a path.
     filename = original_filename
 
+    # The local file is only the transient working copy the parsers read
+    # from during ingestion -- S3 is the actual store of record.
     dest_path = local_write_path(filename)
     contents = await file.read()
     with open(dest_path, "wb") as f:
@@ -1275,23 +1289,18 @@ async def upload_document(file: UploadFile = File(...), folder: str = Form("")):
 
     already_ingested = filename not in files_needing_ingestion([filename], qdrant_service)
 
-    s3_uri = None
-    s3_warning = None
-    s3_storage = get_s3_storage()
-    if s3_storage:
-        try:
-            # A deliberate user upload is the one case that may update an
-            # existing key. Migration/sync never upload or alter S3 objects.
-            s3_uri = s3_storage.upload_file(dest_path, filename)
-        except Exception as exc:
-            s3_warning = f"Saved locally, but S3 upload failed: {exc}"
+    try:
+        # A deliberate user upload is the one case that may update an
+        # existing key. Migration/sync never upload or alter S3 objects.
+        s3_uri = s3_storage.upload_file(dest_path, filename)
+    except Exception as exc:
+        raise HTTPException(502, f"S3 upload failed, so the document was not saved: {exc}")
 
     if already_ingested:
-        if s3_uri:
-            qdrant_service.enrich_document_metadata(
-                filename, canonical_display_name(filename),
-                s3_uri.split("/", 3)[-1], folder, dest_path,
-            )
+        qdrant_service.enrich_document_metadata(
+            filename, canonical_display_name(filename),
+            s3_uri.split("/", 3)[-1], folder, dest_path,
+        )
         return {
             "filename": filename,
             "canonical_name": canonical_display_name(filename),
@@ -1299,7 +1308,6 @@ async def upload_document(file: UploadFile = File(...), folder: str = Form("")):
             "already_indexed": True,
             "chunks": 0,
             "s3_uri": s3_uri,
-            "s3_warning": s3_warning,
         }
 
     try:
@@ -1310,11 +1318,10 @@ async def upload_document(file: UploadFile = File(...), folder: str = Form("")):
     if n_chunks == 0:
         raise HTTPException(422, "No extractable content found in this document.")
 
-    if s3_uri:
-        qdrant_service.enrich_document_metadata(
-            filename, canonical_display_name(filename),
-            s3_uri.split("/", 3)[-1], folder, dest_path,
-        )
+    qdrant_service.enrich_document_metadata(
+        filename, canonical_display_name(filename),
+        s3_uri.split("/", 3)[-1], folder, dest_path,
+    )
 
     return {
         "filename": filename,
@@ -1323,7 +1330,6 @@ async def upload_document(file: UploadFile = File(...), folder: str = Form("")):
         "already_indexed": False,
         "chunks": n_chunks,
         "s3_uri": s3_uri,
-        "s3_warning": s3_warning,
     }
 
 

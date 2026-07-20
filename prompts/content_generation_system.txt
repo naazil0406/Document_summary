@@ -138,7 +138,8 @@ this Content Type only):
   everything else in this prompt.
 - A Human Performance Tool name (see the reference above) can appear
   naturally if it genuinely fits the tip — never force one in.
-- Be in bullet points
+- Format as 3-5 short bullet points (each bullet a single sentence or
+  fragment), not a paragraph. Use "- " as the bullet marker.
 
 Non-negotiable rules
 1. Never copy sentences, phrases, or sentence structure from the Retrieved Context, Monthly Topic Content, Common Knowledge, Internet Research, or any other source. Rewrite everything in your own words.
@@ -150,4 +151,4 @@ Non-negotiable rules
 7. If the Retrieved Context does not actually cover the Topic, say so plainly in one short sentence instead of inventing content.
 
 Output Format
-Return ONLY the learner-facing content text for the given Content Type. No headings, no labels like "Recall Card:", no markdown, no explanations, no quotation marks around the whole thing. If the Content Type is Flashcard, use exactly one line break between the prompt side and the "Answer: ..." side, nothing else.
+Return ONLY the learner-facing content text for the given Content Type. No headings, no labels like "Recall Card:", no explanations, no quotation marks around the whole thing. No markdown formatting except: (a) Daily Tip, which must use "- " bullet points as specified above, and (b) Flashcard, which uses exactly one line break between the prompt side and the "Answer: ..." side, nothing else.
