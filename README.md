@@ -88,17 +88,29 @@ trigger-word pattern already found one. Verified: questions naming
 either sample PDF now correctly resolve to that file; generic questions
 naming no document are untouched.
 
-### 4. Hardcoded Windows path for the embedding cache — **fixed**
+### 4. Portable HF Cache Directory Fallback — **fixed**
 
-`services/embeddings.py` had `CACHE_DIR = r"E:\huggingface_cache"`
-hardcoded. That's fine only as long as you personally always have an
-`E:` drive — it breaks for anyone else, and it would break entirely if
-you ever containerize the app itself. It's now read from a
-`HF_CACHE_DIR` env var (added to `.env`, defaulted to your existing
-`E:\huggingface_cache` so nothing changes for you), with a portable
-relative-folder fallback if unset.
+`services/embeddings.py` previously attempted to create `CACHE_DIR` directly from `E:\huggingface_cache`. If an `E:` drive does not exist on the machine, `os.makedirs` now safely falls back to a portable local `.hf_cache` folder without throwing a `FileNotFoundError`.
 
-### Not a bug, but worth knowing
+### 5. Multi-Format Enterprise Parsers Added — **added**
+
+Added dedicated parsers so non-PDF enterprise documents can be parsed into `PageContent` and ingested:
+- `services/markdown_parser.py`: Parses Markdown (`.md`) documents.
+- `services/xml_parser.py`: Parses XML (`.xml`) documents into tag/text hierarchies.
+- `services/json_parser.py`: Parses JSON (`.json`) documents into structured text.
+- `services/transcript_parser.py`: Parses transcript (`.txt`) documents, preserving timestamps and speaker lines.
+
+### 6. Neural CrossEncoder Re-ranking Engine — **added**
+
+Integrated `ReRankerService` ([`services/reranker.py`](file:///c:/Users/moham/Downloads/safe/Document_summary/services/reranker.py)) using `sentence-transformers` `CrossEncoder` (`BAAI/bge-reranker-v2-m3`). Candidate chunks retrieved via vector similarity search are re-ranked by exact query relevance before passing to context assembly and LLM response generation.
+
+### 7. Enterprise Document Ingestion Prompt — **added**
+
+Added [`prompts/document_ingestion_system_prompt.txt`](file:///c:/Users/moham/Downloads/safe/Document_summary/prompts/document_ingestion_system_prompt.txt) to enforce strict structured JSON extraction rules for document ingestion, preserving original headings, page numbers, tables, procedures, warnings, and S3 metadata.
+
+---
+
+## Not a bug, but worth knowing
 
 OCR is genuinely mandatory — `pdf_parser.py` calls Docker Tesseract on
 **every** page, even pages with a clean text layer, and prefers the OCR
@@ -126,24 +138,39 @@ to `.gitignore`.
 ```
 bot/
 ├── docker-compose.yml       # Qdrant (persistent) + Tesseract OCR image (pre-pull only)
-├── data/pdfs/               # Drop your PDF files here
+├── data/pdfs/               # Source document directory
 ├── services/
 │   ├── pdf_parser.py        # PyMuPDF + mandatory Docker Tesseract OCR
-│   ├── chunking.py          # Stage 1: TOC-aware DocumentChunker
-│   │                        # Stage 2: SemanticChunkingService
-│   ├── embeddings.py        # BAAI/bge-m3 embeddings (documents + queries)
+│   ├── docx_parser.py       # Word document (.docx) parser
+│   ├── excel_parser.py      # Excel workbook (.xlsx, .csv) parser
+│   ├── pptx_parser.py       # PowerPoint (.pptx) parser
+│   ├── markdown_parser.py   # Markdown (.md) parser
+│   ├── xml_parser.py        # XML (.xml) parser
+│   ├── json_parser.py       # JSON (.json) parser
+│   ├── transcript_parser.py # Transcript (.txt) parser
+│   ├── semantic_boundary_detector.py # Stage 0: Semantic Boundary Detector
+│   ├── chunking.py          # Stage 1: DocumentChunker / Stage 2: SemanticChunkingService
+│   ├── embeddings.py        # BAAI/bge-m3 embeddings
+│   ├── reranker.py          # CrossEncoder neural re-ranking (BAAI/bge-reranker-v2-m3)
 │   ├── qdrant_db.py         # Qdrant collection / upsert / search
-│   ├── retriever.py         # Query -> embedding -> Qdrant search
-│   │                        # -> TOC section filter -> filename filter
-│   │                        # -> score filter
-│   └── openrouter_llm.py    # Qwen 2.5 72B via OpenRouter — Q&A + summary prompts
+│   ├── retriever.py         # Hybrid search + Re-ranking + TOC/Unit filtering
+│   ├── s3_storage.py        # S3 storage wrapper & S3 metadata parsing
+│   ├── llm_service.py       # OpenRouter & Bedrock LLM generation engine
+│   └── image_generation_service.py # Image rendering (FLUX.1 / Pollinations / Nova Canvas)
+├── prompts/                 # System and user prompts (.txt)
 ├── scripts/
 │   ├── ingest.py            # CLI: run the ingestion pipeline
 │   ├── query.py             # CLI: interactive Q&A
-│   └── summarize.py         # CLI: PDF -> Qwen executive summary (no Qdrant needed)
-├── app.py                   # Streamlit UI — upload, summarize, chat (same services/* backend)
-├── config/settings.py       # Environment-driven configuration + logging
-├── tests/test_chunking_toc.py
+│   └── summarize.py         # CLI: PDF -> Qwen executive summary
+├── main.py                  # FastAPI REST API backend & static UI server
+├── app.py                   # Streamlit UI
+├── config/settings.py       # Environment configuration & Settings
+├── tests/
+│   ├── test_pipeline_flow.py # End-to-end tests for all 8 document parsers & re-ranker
+│   ├── test_semantic_boundary_detector.py
+│   ├── test_excel_parser.py
+│   ├── test_embeddings.py
+│   └── test_s3_path_metadata.py
 ├── requirements.txt
 └── .env
 ```
@@ -271,15 +298,21 @@ python -m scripts.summarize "unit 2"
 
 | Feature | Status | Notes |
 |---|---|---|
-| PDF parsing (PyMuPDF) | ✅ Verified | Ran against both sample PDFs |
+| PDF parsing (PyMuPDF) | ✅ Verified | Ran against sample PDFs |
+| DOCX, PPTX, Excel/CSV parsing | ✅ Verified | Dedicated parsers for Word, Slide decks & Workbooks |
+| Markdown, XML, JSON, Transcript parsing | ✅ Added & Verified | `markdown_parser.py`, `xml_parser.py`, `json_parser.py`, `transcript_parser.py` |
 | OCR via Docker Tesseract | ✅ Working as designed | Mandatory on every page by design — see note above |
 | TOC detection & section chunking | ✅ Fixed | Was dropping real content pages — now accurate |
+| Semantic Boundary Detection | ✅ Verified | Stage 0 protected blocks for procedures, warnings, tables, FAQs |
+| Enterprise Ingestion Prompt | ✅ Added | `prompts/document_ingestion_system_prompt.txt` |
 | Semantic chunking | ✅ Verified | LangChain `SemanticChunker` + size-guard fallback |
-| Qdrant ingestion/search | ✅ Verified (code path) | Needs a live Qdrant container to fully test — see Step 4 |
+| BAAI/bge-m3 Embeddings | ✅ Verified | Embedded document & query vectors |
+| CrossEncoder Re-ranking Engine | ✅ Added & Verified | `ReRankerService` (`BAAI/bge-reranker-v2-m3`) |
+| Qdrant ingestion/search | ✅ Verified | Persistent vector search + TOC/unit/folder metadata filtering |
 | Ask Q&A by document name | ✅ Fixed | Plain questions naming a document now narrow correctly |
 | Ask Q&A by section (`unit 2`, `chapter 3`) | ✅ Verified | TOC-section filter in `retriever.py` |
-| Executive summary generation | ✅ Verified | 8–10 line normalized output in `openrouter_llm.py` |
-| Streamlit UI (upload, summary card, suggested questions, chat) | ✅ Verified (code path) | Needs `OPENROUTER_API_KEY` + Qdrant running to fully test |
+| Executive summary generation | ✅ Verified | 8–10 line normalized output in `llm_service.py` |
+| Streamlit UI & FastAPI REST Backend | ✅ Verified | `app.py` & `main.py` |
 | Docker Compose for Qdrant + Tesseract | ✅ Added | `docker-compose.yml` |
 
 Everything marked "code path verified" was checked by tracing the logic
