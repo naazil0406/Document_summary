@@ -61,7 +61,7 @@ from services.document_resolver import (
 )
 from services.canonical_naming import canonical_display_name, current_month_folder, parse_canonical, unique_id_for
 from services import name_mapping
-from services.image_generation_service import HuggingFaceFluxService, PollinationsImageService, NovaCanvasService
+from services.image_generation_service import HuggingFaceFluxService, PollinationsImageService, NovaCanvasService, FreepikImageService
 
 logger = logging.getLogger(__name__)
 
@@ -209,13 +209,14 @@ def get_image_prompt_llm() -> BedrockLLMService:
 
 @lru_cache(maxsize=1)
 def get_image_gen_service():
-    """Returns the configured image-rendering backend (all three expose the
+    """Returns the configured image-rendering backend (all four expose the
     same `.generate_image(prompt)` interface — see
     services/image_generation_service.py).
 
     Defaults to FLUX.1-dev via Hugging Face Inference Providers (requires
     HF_TOKEN). Set IMAGE_PROVIDER=pollinations for the no-signup free
-    option, or IMAGE_PROVIDER=aws for Bedrock Nova Canvas.
+    option, IMAGE_PROVIDER=freepik for Freepik Mystic (requires
+    FREEPIK_API_KEY), or IMAGE_PROVIDER=aws for Bedrock Nova Canvas.
     """
     if settings.IMAGE_PROVIDER == "aws":
         return NovaCanvasService(
@@ -235,6 +236,18 @@ def get_image_gen_service():
             base_url=settings.POLLINATIONS_BASE_URL,
             width=settings.IMAGE_WIDTH,
             height=settings.IMAGE_HEIGHT,
+        )
+
+    if settings.IMAGE_PROVIDER == "freepik":
+        return FreepikImageService(
+            api_key=settings.FREEPIK_API_KEY,
+            model=settings.FREEPIK_MODEL,
+            resolution=settings.FREEPIK_RESOLUTION,
+            width=settings.IMAGE_WIDTH,
+            height=settings.IMAGE_HEIGHT,
+            filter_nsfw=settings.FREEPIK_FILTER_NSFW,
+            poll_interval=settings.FREEPIK_POLL_INTERVAL,
+            poll_timeout=settings.FREEPIK_POLL_TIMEOUT,
         )
 
     return HuggingFaceFluxService(

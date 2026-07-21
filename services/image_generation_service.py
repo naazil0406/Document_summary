@@ -1,12 +1,12 @@
 """
 Image generation services — FLUX.1-dev via Hugging Face Inference Providers
-(default), Pollinations AI (free option), and Amazon Nova Canvas (Bedrock,
-optional) transports.
+(default), Pollinations AI (free option), Freepik Mystic (optional), and
+Amazon Nova Canvas (Bedrock, optional) transports.
 
-All three are the second model in the image pipeline (see
+All four are the second model in the image pipeline (see
 services/llm_service.py's BaseLLMService.generate_image_prompt for the
 first: Nova Lite turning a user request + retrieved RAG context into one
-optimized text prompt). All three classes expose the same
+optimized text prompt). All four classes expose the same
 `generate_image(prompt, negative_prompt="") -> bytes` interface, so
 main.py's get_image_gen_service() can hand back whichever one based on
 settings.IMAGE_PROVIDER.
@@ -27,6 +27,15 @@ https://image.pollinations.ai/prompt/{url-encoded-prompt} (with a few query
 params) returns raw image bytes directly — no auth, no AWS account, no
 Bedrock model access request needed. Kept here as a no-signup fallback.
 
+Freepik Mystic (https://docs.freepik.com/api-reference/mystic) is Freepik's
+in-house text-to-image model, requires a Freepik API key
+(freepik.com/api -> API Dashboard -> API key), and is asynchronous:
+POST /v1/ai/mystic submits the prompt and returns a task_id immediately
+(status "IN_PROGRESS"); the actual image only exists once polling
+GET /v1/ai/mystic/{task_id} reports status "COMPLETED", at which point
+`generated` contains a temporary signed CDN URL that must be downloaded
+separately to get the actual image bytes.
+
 Nova Canvas is invoked differently from the Nova text models
 (BedrockLLMService in llm_service.py): it does not use the Converse API,
 it uses bedrock-runtime.invoke_model with a Nova-Canvas-specific JSON body,
@@ -38,6 +47,8 @@ import base64
 import io
 import json
 import logging
+import time
+from math import gcd
 from urllib.parse import quote
 
 import requests
@@ -194,6 +205,195 @@ class PollinationsImageService:
             raise RuntimeError("Pollinations AI returned no image data.")
 
         return image_bytes
+
+
+class FreepikImageService:
+    """Transport over Freepik's text-to-image APIs.
+
+    Freepik hosts several distinct models behind broadly the same
+    asynchronous shape (submit a prompt, get a task_id back, poll until
+    "COMPLETED", download the resulting CDN URL) but different endpoints
+    and request bodies:
+
+      - "realism" (default) or "flexible": Mystic style presets, Freepik's
+        own in-house model, via POST /v1/ai/mystic. Supports resolution
+        and filter_nsfw controls.
+      - "flux-dev": Freepik-hosted FLUX.1-dev, via
+        POST /v1/ai/text-to-image/flux-dev.
+      - "hyperflux": Freepik-hosted fast Flux variant, via
+        POST /v1/ai/text-to-image/hyperflux.
+      - "seedream-v4-5": ByteDance's Seedream 4.5, via
+        POST /v1/ai/text-to-image/seedream-v4-5. Purpose-built for dense,
+        legible in-image text (labels, headings, short body copy) -- worth
+        switching to specifically when Mystic/Flux output is coming back
+        with garbled/misspelled text, which is an inherent limitation of
+        those models rather than a prompt-wording problem.
+
+    Selected via the FREEPIK_MODEL setting -- one API key, one env var,
+    switches both which model and which endpoint gets used. Every option
+    still exposes the same generate_image(prompt, negative_prompt="") ->
+    bytes interface as every other provider in this module.
+
+    Requires a Freepik API key (freepik.com/api -> API Dashboard -> API
+    key). See https://docs.freepik.com/api-reference.
+    """
+
+    # Aspect ratio enum shared across every Freepik text-to-image endpoint.
+    _ASPECT_RATIOS = {
+        (1, 1): "square_1_1",
+        (4, 3): "classic_4_3",
+        (3, 4): "traditional_3_4",
+        (16, 9): "widescreen_16_9",
+        (9, 16): "social_story_9_16",
+    }
+
+    # Non-Mystic models each get their own endpoint under text-to-image/.
+    # Anything not listed here (including "realism"/"flexible") is treated
+    # as a Mystic style preset and goes to /v1/ai/mystic instead.
+    _FLUX_ENDPOINTS = {
+        "flux-dev": "https://api.freepik.com/v1/ai/text-to-image/flux-dev",
+        "hyperflux": "https://api.freepik.com/v1/ai/text-to-image/hyperflux",
+        "seedream-v4-5": "https://api.freepik.com/v1/ai/text-to-image/seedream-v4-5",
+    }
+    _MYSTIC_URL = "https://api.freepik.com/v1/ai/mystic"
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "realism",
+        resolution: str = "2k",
+        width: int = 1024,
+        height: int = 1024,
+        filter_nsfw: bool = True,
+        poll_interval: float = 3.0,
+        poll_timeout: float = 120.0,
+    ):
+        if not api_key:
+            raise RuntimeError(
+                "FREEPIK_API_KEY is not set — required when IMAGE_PROVIDER='freepik'."
+            )
+        self.api_key = api_key
+        self.model = model
+        self.resolution = resolution
+        self.aspect_ratio = self._aspect_ratio_for(width, height)
+        self.filter_nsfw = filter_nsfw
+        self.poll_interval = poll_interval
+        self.poll_timeout = poll_timeout
+
+        self.submit_url = self._FLUX_ENDPOINTS.get(model, self._MYSTIC_URL)
+        self.is_mystic = self.submit_url == self._MYSTIC_URL
+
+    def _aspect_ratio_for(self, width: int, height: int) -> str:
+        divisor = gcd(width, height) or 1
+        ratio = (width // divisor, height // divisor)
+        return self._ASPECT_RATIOS.get(ratio, "square_1_1")
+
+    def _build_body(self, full_prompt: str) -> dict:
+        if self.is_mystic:
+            return {
+                "prompt": full_prompt,
+                "model": self.model,
+                "resolution": self.resolution,
+                "aspect_ratio": self.aspect_ratio,
+                "filter_nsfw": self.filter_nsfw,
+            }
+        # The Flux-family endpoints use a simpler schema -- no style
+        # preset, resolution, or filter_nsfw fields.
+        return {
+            "prompt": full_prompt,
+            "aspect_ratio": self.aspect_ratio,
+        }
+
+    def generate_image(self, prompt: str, negative_prompt: str = "") -> bytes:
+        """Submit the prompt to whichever Freepik endpoint FREEPIK_MODEL
+        selects, poll until the task completes, then download and return
+        the raw generated image bytes.
+
+        None of Freepik's text-to-image endpoints have a dedicated
+        negative-prompt field, so if one is supplied it's folded into the
+        main prompt text as a simple instruction (same approach as
+        PollinationsImageService). Raises RuntimeError on any request
+        failure, a FAILED task, or a timeout waiting for completion,
+        rather than silently returning empty bytes.
+        """
+        full_prompt = prompt
+        if negative_prompt:
+            full_prompt = f"{prompt}. Avoid: {negative_prompt}"
+
+        headers = {
+            "Content-Type": "application/json",
+            "x-freepik-api-key": self.api_key,
+        }
+        body = self._build_body(full_prompt)
+
+        logger.info(
+            "Submitting prompt to Freepik (model=%s, endpoint=%s, prompt=%d chars).",
+            self.model, self.submit_url, len(prompt),
+        )
+
+        try:
+            response = requests.post(self.submit_url, headers=headers, json=body, timeout=30)
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Freepik submission failed for model '{self.model}': {exc}") from exc
+
+        task = (response.json() or {}).get("data", {})
+        task_id = task.get("task_id")
+        if not task_id:
+            raise RuntimeError(f"Freepik ({self.model}) did not return a task_id.")
+
+        image_url = self._poll_until_complete(task_id, headers)
+
+        try:
+            image_response = requests.get(image_url, timeout=60)
+            image_response.raise_for_status()
+        except requests.RequestException as exc:
+            raise RuntimeError(
+                f"Failed to download the generated image from Freepik: {exc}"
+            ) from exc
+
+        image_bytes = image_response.content
+        if not image_bytes:
+            raise RuntimeError("Freepik image download returned no data.")
+        return image_bytes
+
+    def _poll_until_complete(self, task_id: str, headers: dict) -> str:
+        status_url = f"{self.submit_url}/{task_id}"
+        deadline = time.monotonic() + self.poll_timeout
+
+        while True:
+            try:
+                status_response = requests.get(status_url, headers=headers, timeout=30)
+                status_response.raise_for_status()
+            except requests.RequestException as exc:
+                raise RuntimeError(f"Freepik status check failed: {exc}") from exc
+
+            data = (status_response.json() or {}).get("data", {})
+            status = data.get("status")
+
+            if status == "COMPLETED":
+                generated = data.get("generated", [])
+                if not generated:
+                    raise RuntimeError(
+                        f"Freepik task '{task_id}' completed but returned no image."
+                    )
+                return generated[0]
+
+            if status == "FAILED":
+                raise RuntimeError(f"Freepik task '{task_id}' failed: {data}")
+
+            if time.monotonic() > deadline:
+                raise RuntimeError(
+                    f"Freepik task '{task_id}' did not complete within "
+                    f"{self.poll_timeout:.0f}s (last status: {status!r})."
+                )
+            time.sleep(self.poll_interval)
+
+
+# Backwards-compatible alias -- FreepikImageService replaces the earlier,
+# Mystic-only FreepikMysticService with a single class covering both
+# Mystic and Freepik's separate Flux endpoints (flux-dev, hyperflux).
+FreepikMysticService = FreepikImageService
 
 
 class NovaCanvasService:

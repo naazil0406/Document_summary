@@ -144,7 +144,7 @@ class Settings:
     CONTENT_MAX_TOKENS: int = int(os.getenv("CONTENT_MAX_TOKENS", "400"))
     CONTENT_TEMPERATURE: float = float(os.getenv("CONTENT_TEMPERATURE", "0.7"))
 
-    # Renderer 2: turns that prompt into the actual image. Three
+    # Renderer 2: turns that prompt into the actual image. Four
     # interchangeable providers, all exposed as `.generate_image(prompt)` in
     # services/image_generation_service.py — see get_image_gen_service() in
     # main.py for the switch.
@@ -153,6 +153,9 @@ class Settings:
     #     hf-inference has a free tier.
     #   "pollinations": Pollinations AI — free, no API key or AWS account
     #     required. https://pollinations.ai
+    #   "freepik": Freepik Mystic — requires FREEPIK_API_KEY
+    #     (freepik.com/api -> API Dashboard -> API key). Asynchronous:
+    #     submits a task and polls until it completes.
     #   "aws": Amazon Bedrock Nova Canvas — requires AWS credentials and
     #     Bedrock model access; kept as an opt-in alternative.
     IMAGE_PROVIDER: str = os.getenv("IMAGE_PROVIDER", "huggingface")
@@ -179,6 +182,25 @@ class Settings:
     # Pollinations AI settings (used when IMAGE_PROVIDER == "pollinations")
     POLLINATIONS_MODEL: str = os.getenv("POLLINATIONS_MODEL", "flux")
     POLLINATIONS_BASE_URL: str = os.getenv("POLLINATIONS_BASE_URL", "https://image.pollinations.ai/prompt")
+
+    # Freepik Mystic settings (used when IMAGE_PROVIDER == "freepik")
+    FREEPIK_API_KEY: str = os.getenv("FREEPIK_API_KEY", "").strip()
+    # Mystic style preset: "realism" (default, natural/photographic) or
+    # "flexible" (better prompt adherence, more saturated/HDR — good for
+    # illustrations). See https://docs.freepik.com/api-reference/mystic.
+    # Alternatively set this to "flux-dev" or "hyperflux" to use Freepik's
+    # separately-hosted Flux models instead of Mystic (same API key, same
+    # FreepikImageService class — it switches endpoints automatically).
+    # If in-image text keeps coming out garbled/misspelled -- an inherent
+    # limitation of Mystic and Flux, not a prompt-wording problem -- set
+    # this to "seedream-v4-5" instead: ByteDance's Seedream 4.5, purpose-
+    # built for accurate dense text/typography rendering.
+    FREEPIK_MODEL: str = os.getenv("FREEPIK_MODEL", "realism")
+    FREEPIK_RESOLUTION: str = os.getenv("FREEPIK_RESOLUTION", "2k")
+    FREEPIK_FILTER_NSFW: bool = os.getenv("FREEPIK_FILTER_NSFW", "true").strip().lower() == "true"
+    # How long to poll before giving up on a Mystic task (seconds).
+    FREEPIK_POLL_INTERVAL: float = float(os.getenv("FREEPIK_POLL_INTERVAL", "3.0"))
+    FREEPIK_POLL_TIMEOUT: float = float(os.getenv("FREEPIK_POLL_TIMEOUT", "120.0"))
 
     # Nova Canvas settings (used when IMAGE_PROVIDER == "aws"). Uses
     # invoke_model, not converse — a different call shape from every other
