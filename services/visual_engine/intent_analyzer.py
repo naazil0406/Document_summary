@@ -26,6 +26,30 @@ class IntentAnalyzer:
         """Parse raw request using heuristic rules or LLM fallback into UserIntent."""
         request_lower = user_request.lower()
 
+        # Content Type detection
+        content_type = "Scenario"
+        raw_topic = user_request.strip()
+        known_content_types = [
+            "Recall Card", "AI Image", "Infographic", "Flashcard", "Scenario",
+            "Spot the Mistake Challenge", "Daily Quiz", "Fun Fact",
+            "Reflection Question", "Safety / Best Practice Tip", "Daily Tip"
+        ]
+
+        if ":" in user_request:
+            prefix, rest = user_request.split(":", 1)
+            prefix_stripped = prefix.strip()
+            for ctype in known_content_types:
+                if prefix_stripped.lower() == ctype.lower():
+                    content_type = ctype
+                    raw_topic = rest.strip()
+                    break
+
+        if content_type == "Scenario" and ":" not in user_request:
+            for ctype in known_content_types:
+                if ctype.lower() in request_lower:
+                    content_type = ctype
+                    break
+
         # Domain heuristic detection
         domain = domain_override
         if not domain:
@@ -51,13 +75,14 @@ class IntentAnalyzer:
 
         # Style preference fallback
         style = style_preference or "commercial_photography"
-        if "infographic" in request_lower or "diagram" in request_lower:
+        if content_type == "Infographic" or "infographic" in request_lower or "diagram" in request_lower:
             style = "infographic_illustration"
         elif "cinematic" in request_lower or "movie" in request_lower or "story" in request_lower:
             style = "cinematic_storytelling"
 
         return UserIntent(
-            raw_request=user_request,
+            raw_request=raw_topic,
+            content_type=content_type,
             domain=domain,
             communication_purpose=purpose,
             target_audience="frontline workforce and safety managers" if domain == "warehouse" else "general professional",

@@ -10,6 +10,7 @@ class UserIntent(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     raw_request: str = Field(..., description="Original user topic or query")
+    content_type: str = Field(default="Scenario", description="Content type requested (e.g. Recall Card, Infographic, Scenario)")
     domain: str = Field(default="general", description="Inferred or explicitly specified domain (e.g., warehouse, healthcare, marketing)")
     communication_purpose: str = Field(default="education", description="Primary goal: safety, marketing, education, corporate, training, etc.")
     target_audience: str = Field(default="general professional", description="Target audience demographic or professional tier")

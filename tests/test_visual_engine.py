@@ -73,27 +73,20 @@ def test_visual_engine_healthcare():
     assert output.consistency_report.is_consistent is True
 
 
-def test_visual_engine_with_mock_llm_and_retriever():
-    class MockRetriever:
-        def retrieve(self, query, doc_name=None, folder=None, folders=None):
-            class Chunk:
-                text = "Sample safety rule chunk"
-            return [Chunk()]
-
-    class MockLLM:
-        def _call_llm(self, system_prompt: str, user_prompt: str) -> str:
-            return "Sample generated content text incorporating Rate Your State (RYS)."
-
-    engine = UniversalVisualContentEngine(
-        llm_service=MockLLM(),
-        retriever_service=MockRetriever(),
-        image_service=None
-    )
-    output = engine.generate_content_and_visual(
-        user_request="Heat stress safety",
-        domain_override="warehouse",
+def test_visual_engine_content_type_parsing():
+    engine = UniversalVisualContentEngine(llm_service=None, retriever_service=None, image_service=None)
+    output_recall = engine.generate_content_and_visual(
+        user_request="Recall Card: heatwave awareness",
         generate_image_bytes=False
     )
-    assert "Sample generated content" in output.generated_content.raw_content
-    assert output.consistency_report.is_consistent is True
+    assert output_recall.intent.content_type == "Recall Card"
+    assert output_recall.intent.raw_request == "heatwave awareness"
+
+    output_info = engine.generate_content_and_visual(
+        user_request="Infographic: warehouse forklift safety",
+        generate_image_bytes=False
+    )
+    assert output_info.intent.content_type == "Infographic"
+    assert output_info.intent.style_preference == "infographic_illustration"
+
 

@@ -161,7 +161,22 @@ class UniversalVisualContentEngine:
     def _generate_text_content(self, intent: UserIntent, retrieved_context: str = "") -> ContentGenerationOutput:
         """Produces story/lesson content as the single source of truth (100-180 words, incorporating Human Performance Tools)."""
         if self.llm_service:
-            # Load system prompt from prompts/content_generation_system.txt if available
+            if hasattr(self.llm_service, "generate_learning_content"):
+                try:
+                    raw_text = self.llm_service.generate_learning_content(
+                        content_type=intent.content_type,
+                        topic=intent.raw_request,
+                        chunks=[]
+                    )
+                    return ContentGenerationOutput(
+                        raw_content=raw_text,
+                        title=f"{intent.content_type}: {intent.raw_request}",
+                        core_message=intent.raw_request,
+                        key_takeaways=[]
+                    )
+                except Exception as exc:
+                    logger.warning(f"generate_learning_content failed ({exc}), falling back to raw _call_llm.")
+
             import os
             prompts_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "prompts")
             sys_prompt_path = os.path.join(prompts_dir, "content_generation_system.txt")
@@ -175,13 +190,13 @@ class UniversalVisualContentEngine:
                     logger.warning(f"Could not load content_generation_system.txt: {exc}")
 
             user_prompt = (
-                f"Content Type: Scenario\n"
+                f"Content Type: {intent.content_type}\n"
                 f"Topic: {intent.raw_request}\n"
                 f"Target Domain: {intent.domain}\n"
                 f"Communication Purpose: {intent.communication_purpose}\n"
                 f"Retrieved Context: {retrieved_context}\n\n"
-                f"Write a dramatic 100-180 word scenario story in third-person narrative format with named specific character(s) (e.g. Alex, Marcus, Maria). "
-                f"Describe vivid physical actions, environmental conditions, and clear human interactions. "
+                f"Write 100-180 words for the given Content Type ({intent.content_type}). "
+                f"For Scenario/Story content, use third-person narrative format with named specific character(s) (e.g. Alex, Marcus, Maria) and vivid physical actions. "
                 f"Naturally incorporate one or more Human Performance Tools (such as Rate Your State (RYS), Anticipating Error, Close Calls, Habit Reminder, or RYS Supervisor Conversation)."
             )
 
@@ -191,9 +206,9 @@ class UniversalVisualContentEngine:
             )
             return ContentGenerationOutput(
                 raw_content=raw_text,
-                title=f"{intent.domain.capitalize()} {intent.communication_purpose.capitalize()} Lesson",
+                title=f"{intent.content_type}: {intent.raw_request}",
                 core_message=intent.raw_request,
-                key_takeaways=["Recognize early human performance states", "Apply Human Performance Tools before hazards escalate"]
+                key_takeaways=[]
             )
 
         # Built-in fallback content (100-180 words, max 2 paragraphs or bullet points based on card type)
