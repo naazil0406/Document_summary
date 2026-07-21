@@ -69,7 +69,7 @@ class UniversalVisualContentEngine:
         retrieved_context = ""
         if self.retriever_service:
             try:
-                retrieved_chunks = self.retriever_service.retrieve(intent.raw_request, top_k=3)
+                retrieved_chunks = self.retriever_service.retrieve(intent.raw_request)
                 retrieved_context = "\n".join(chunk.text for chunk in retrieved_chunks)
             except Exception as e:
                 logger.warning(f"Retrieval step failed ({e}), continuing without context.")
@@ -184,7 +184,7 @@ class UniversalVisualContentEngine:
                 f"Make sure to naturally incorporate one or more Human Performance Tools (such as Rate Your State (RYS), Anticipating Error, Close Calls, Habit Reminder, or RYS Supervisor Conversation)."
             )
 
-            raw_text = self.llm_service.generate_answer(
+            raw_text = self.llm_service._call_llm(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt
             )

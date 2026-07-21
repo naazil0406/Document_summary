@@ -68,7 +68,7 @@ Output ONLY valid JSON matching this exact structure:
   "overall_mood": "urgent, realistic, professional"
 }}"""
 
-        response_text = self.llm_service.generate_answer(
+        response_text = self.llm_service._call_llm(
             system_prompt="Extract structured vision schema from text. Respond ONLY with valid JSON.",
             user_prompt=prompt,
         )
