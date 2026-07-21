@@ -885,6 +885,17 @@ button { font-family: inherit; cursor: pointer; }
   object-fit: cover;
   flex-shrink: 0;
 }
+.content-rail-item-thumb-placeholder {
+  width: 36px;
+  height: 36px;
+  border-radius: 6px;
+  background: rgba(184,134,43,0.12);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  flex-shrink: 0;
+}
 .content-rail-item-label {
   display: flex;
   flex-direction: column;
@@ -1431,16 +1442,23 @@ button { font-family: inherit; cursor: pointer; }
 
     const promptEl = document.getElementById("contentPromptText");
     const toggle = document.getElementById("contentPromptToggle");
-    promptEl.textContent = entry.imagePrompt;
+    promptEl.textContent = entry.imagePrompt || "No image prompt stored.";
     promptEl.hidden = true;
     toggle.textContent = "Show image prompt ▾";
 
     const pic = document.getElementById("contentPicture");
-    pic.src = `data:image/png;base64,${entry.imageBase64}`;
-
     const dl = document.getElementById("contentDownload");
-    dl.href = pic.src;
-    dl.download = `${entry.contentType.replace(/\s+/g, "_")}_${entry.topic.replace(/\s+/g, "_").slice(0, 30)}.png`;
+    if (entry.imageBase64) {
+      pic.src = `data:image/png;base64,${entry.imageBase64}`;
+      pic.style.display = "block";
+      dl.href = pic.src;
+      dl.download = `${entry.contentType.replace(/\s+/g, "_")}_${entry.topic.replace(/\s+/g, "_").slice(0, 30)}.png`;
+      dl.style.display = "inline-flex";
+    } else {
+      pic.src = "";
+      pic.style.display = "none";
+      dl.style.display = "none";
+    }
 
     document.querySelectorAll(".content-rail-item").forEach((el) => {
       el.classList.toggle("is-active", el.dataset.id === entry.id);
@@ -1458,7 +1476,10 @@ button { font-family: inherit; cursor: pointer; }
       .map(
         (item) => `
           <button class="content-rail-item${item.id === activeContentId ? " is-active" : ""}" data-id="${item.id}">
-            <img class="content-rail-item-thumb" src="data:image/png;base64,${item.imageBase64}" alt="" />
+            ${item.imageBase64
+              ? `<img class="content-rail-item-thumb" src="data:image/png;base64,${item.imageBase64}" alt="" />`
+              : `<div class="content-rail-item-thumb-placeholder">📌</div>`
+            }
             <div class="content-rail-item-label">
               <span class="content-rail-item-type">${escapeHtml(item.contentType)}</span>
               <span class="content-rail-item-topic">${escapeHtml(item.topic)}</span>
