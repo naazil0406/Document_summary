@@ -1283,18 +1283,27 @@ def _list_saved_learning_content() -> List[dict]:
                 parts = filename.replace("generated_", "").replace(".txt", "").split("_")
                 c_type = parts[0] if parts else "Scenario"
                 topic_str = " ".join(parts[1:-2]) if len(parts) > 3 else "Learning Content"
+                timestamp_str = parts[-2] + "_" + parts[-1] if len(parts) >= 2 else ""
 
+                # Find specific matching image by timestamp or topic in Generated_images
                 img_b64 = ""
                 if os.path.isdir(settings.GENERATED_IMAGES_DIR):
+                    matching_img_file = None
                     for img_file in os.listdir(settings.GENERATED_IMAGES_DIR):
                         if img_file.endswith(".png"):
-                            full_img = os.path.join(settings.GENERATED_IMAGES_DIR, img_file)
-                            try:
-                                with open(full_img, "rb") as img_f:
-                                    img_b64 = base64.b64encode(img_f.read()).decode("utf-8")
+                            if timestamp_str and timestamp_str in img_file:
+                                matching_img_file = img_file
                                 break
-                            except Exception:
-                                pass
+                            elif topic_str.lower() in img_file.lower():
+                                matching_img_file = img_file
+
+                    if matching_img_file:
+                        full_img = os.path.join(settings.GENERATED_IMAGES_DIR, matching_img_file)
+                        try:
+                            with open(full_img, "rb") as img_f:
+                                img_b64 = base64.b64encode(img_f.read()).decode("utf-8")
+                        except Exception:
+                            pass
 
                 entries.append({
                     "id": filename.replace(".txt", ""),
