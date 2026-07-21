@@ -217,6 +217,12 @@ class Settings:
     # returned directly in the API response (mirrors NARRATIVE_SCRIPTS_DIR).
     GENERATED_IMAGES_DIR: str = os.getenv("GENERATED_IMAGES_DIR", "Generated_images")
 
+    # Local folder generated learning-content text is saved to (mirrors
+    # GENERATED_IMAGES_DIR above). Also where the per-(content_type, topic)
+    # history file used to keep repeat generations from converging on the
+    # same wording lives (see main.py's _load_content_history()).
+    GENERATED_CONTENT_DIR: str = os.getenv("GENERATED_CONTENT_DIR", "Generated_content")
+
     # --- Logging ---
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 

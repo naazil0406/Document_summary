@@ -768,6 +768,7 @@ class BaseLLMService:
         count: int = 1,
         common_data: Optional[str] = None,
         web_results: Optional[str] = None,
+        seed_history: Optional[List[str]] = None,
     ) -> List[str]:
         """Daily Tip: one or more 40-80 word, conversational, practical
         learning tips — "advice from an experienced safety coach", per
@@ -795,12 +796,19 @@ class BaseLLMService:
         `chunks` — if the source material only supports a few genuinely
         different tips, the model may still converge somewhat; that's a
         content-availability limit, not a bug in this loop.
+
+        seed_history: tips already generated for this same topic in past,
+        separate requests (e.g. loaded from an on-disk history file by the
+        caller). Included in avoid_repeating from the very first tip in
+        this batch, so re-running "give me today's daily tip" on the same
+        topic doesn't converge on the same tip it gave last time.
         """
         effective_topic = topic.strip() if topic and topic.strip() else "today's safety learning"
         count = max(1, count)
         rotation = _DAILY_TIP_FOCUS_ROTATION
         start = random.randrange(len(rotation))
         tips: List[str] = []
+        prior_tips = list(seed_history) if seed_history else []
         for i in range(count):
             focus = rotation[(start + i) % len(rotation)]
             tip = self._generate_one_daily_tip(
@@ -808,7 +816,7 @@ class BaseLLMService:
                 effective_topic,
                 common_data=common_data,
                 web_results=web_results,
-                avoid_repeating=tips or None,
+                avoid_repeating=(prior_tips + tips) or None,
                 focus=focus,
             )
             tips.append(tip)

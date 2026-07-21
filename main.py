@@ -17,6 +17,7 @@ the UI wired to the endpoints below.
 """
 
 import base64
+import json
 import logging
 import os
 import re
@@ -951,6 +952,81 @@ def _list_saved_dual_scripts() -> List[dict]:
     return entries
 
 
+_CONTENT_HISTORY_FILE = "_history.json"
+# How many previous generations per (content_type, topic) pair are kept
+# and fed back to the model as "don't repeat this" examples. Bounded so
+# the avoid_repeating block in the prompt doesn't grow without limit for
+# topics that get regenerated many times.
+_CONTENT_HISTORY_MAX_PER_KEY = 15
+
+
+def _content_history_key(content_type: str, topic: str) -> str:
+    """Stable lookup key for a (content_type, topic) pair, used both as
+    the history-file dict key and as the on-disk filename prefix."""
+    raw = f"{content_type}_{topic}".lower()
+    key = re.sub(r"[^a-z0-9]+", "_", raw).strip("_")
+    return key or "content"
+
+
+def _content_history_path() -> str:
+    return os.path.join(settings.GENERATED_CONTENT_DIR, _CONTENT_HISTORY_FILE)
+
+
+def _load_content_history(key: str) -> List[str]:
+    """Previously generated content_text values for this exact
+    (content_type, topic) pair, oldest first. Returns [] the first time
+    a pair is generated, or if the history file is missing/corrupt."""
+    path = _content_history_path()
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("Could not read content history at '%s': %s", path, exc)
+        return []
+    return data.get(key, [])
+
+
+def _append_content_history(key: str, content_text: str) -> None:
+    """Record a newly generated content_text under its (content_type,
+    topic) key so the *next* call for the same pair can be told to avoid
+    repeating it. Keeps only the most recent _CONTENT_HISTORY_MAX_PER_KEY
+    entries per key."""
+    os.makedirs(settings.GENERATED_CONTENT_DIR, exist_ok=True)
+    path = _content_history_path()
+    data = {}
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            data = {}
+    history = data.get(key, [])
+    history.append(content_text)
+    data[key] = history[-_CONTENT_HISTORY_MAX_PER_KEY:]
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except OSError as exc:
+        logger.warning("Could not write content history at '%s': %s", path, exc)
+
+
+def save_generated_content(content_text: str, content_type: str, topic: str) -> str:
+    """Save one generated learning-content text to disk as a standalone
+    .txt file, mirroring save_generated_image() for images. Returns the
+    path it was written to."""
+    os.makedirs(settings.GENERATED_CONTENT_DIR, exist_ok=True)
+    safe_label = re.sub(r"[^A-Za-z0-9_-]+", "_", f"{content_type}_{topic}"[:60]).strip("_") or "content"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"generated_{safe_label}_{timestamp}.txt"
+    path = os.path.join(settings.GENERATED_CONTENT_DIR, filename)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content_text)
+    logger.info("Saved generated content to '%s'.", path)
+    return path
+
+
 def save_generated_image(image_bytes: bytes, label: str) -> str:
     os.makedirs(settings.GENERATED_IMAGES_DIR, exist_ok=True)
     safe_label = re.sub(r"[^A-Za-z0-9_-]+", "_", label).strip("_") or "image"
@@ -1118,6 +1194,14 @@ def generate_learning_feed_item(
             "Upload and process the relevant document first."
         )
 
+    # Look up everything previously generated for this exact
+    # (content_type, topic) pair (across past requests, not just this
+    # batch) so repeat calls — e.g. clicking "regenerate" on the same
+    # topic — pick a different fact/angle/phrasing instead of converging
+    # on the same wording each time.
+    history_key = _content_history_key(content_type, topic)
+    avoid_repeating = _load_content_history(history_key)
+
     content_text = content_llm.generate_learning_content(
         content_type,
         topic,
@@ -1125,7 +1209,14 @@ def generate_learning_feed_item(
         monthly_topic_content=monthly_topic_content,
         common_data=common_data,
         web_results=web_results,
+        avoid_repeating=avoid_repeating or None,
     )
+
+    # Persist this generation both as a standalone local file and into the
+    # history used to steer future generations for this same pair away
+    # from repeating it.
+    content_saved_path = save_generated_content(content_text, content_type, topic)
+    _append_content_history(history_key, content_text)
 
     # The Image Prompt Generation Agent (Nova Lite) is driven by what the
     # content actually says, not just the bare topic, so the image matches
@@ -1144,6 +1235,7 @@ def generate_learning_feed_item(
         "content_type": content_type,
         "topic": topic,
         "content_text": content_text,
+        "content_saved_path": content_saved_path,
         "image_prompt": image_prompt,
         "image_base64": base64.b64encode(image_bytes).decode("utf-8"),
         "saved_path": saved_path,
@@ -1335,6 +1427,7 @@ class ContentGenResponse(BaseModel):
     content_type: str
     topic: str
     content_text: str
+    content_saved_path: str
     image_prompt: str
     image_base64: str
     saved_path: str
@@ -1360,6 +1453,7 @@ class DailyTipResponse(BaseModel):
     topic: str
     tips: List[str]
     word_counts: List[int]
+    saved_paths: List[str] = []
 
 
 @app.on_event("startup")
@@ -2034,6 +2128,10 @@ def daily_tip(req: DailyTipRequest):
             "Upload and process documents first.",
         )
 
+    effective_topic = topic or "today's safety learning"
+    history_key = _content_history_key("Daily Tip", effective_topic)
+    seed_history = _load_content_history(history_key)
+
     try:
         tips = content_llm.generate_daily_tips(
             chunks,
@@ -2041,6 +2139,7 @@ def daily_tip(req: DailyTipRequest):
             count=count,
             common_data=req.common_data,
             web_results=req.web_results,
+            seed_history=seed_history,
         )
     except RuntimeError as exc:
         raise HTTPException(502, str(exc))
@@ -2048,10 +2147,18 @@ def daily_tip(req: DailyTipRequest):
         logger.error("Daily tip generation failed: %s", exc)
         raise HTTPException(500, "An error occurred while generating the daily tip(s).")
 
+    # Save each tip locally and record it in the history used to keep
+    # future requests for this same topic from repeating it.
+    saved_paths = []
+    for tip in tips:
+        saved_paths.append(save_generated_content(tip, "Daily Tip", effective_topic))
+        _append_content_history(history_key, tip)
+
     return DailyTipResponse(
-        topic=topic or "today's safety learning",
+        topic=effective_topic,
         tips=tips,
         word_counts=[len(t.split()) for t in tips],
+        saved_paths=saved_paths,
     )
 
 
