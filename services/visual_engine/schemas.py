@@ -50,12 +50,12 @@ class ObjectEntity(BaseModel):
 class EnvironmentEntity(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    location: str = Field(..., description="Primary location (e.g., industrial warehouse floor)")
-    building_type: str = Field(default="warehouse", description="Structure type")
-    weather: str = Field(default="hot summer day", description="Weather condition")
-    season: str = Field(default="summer", description="Season")
-    time_of_day: str = Field(default="midday", description="Time of day")
-    lighting_clues: str = Field(default="harsh bright sunlight, high contrast ambient shadows", description="Lighting environment")
+    location: str = Field(default="indoor environment", description="Primary location (e.g., classroom, warehouse floor, clinic office)")
+    building_type: str = Field(default="facility", description="Structure type")
+    weather: str = Field(default="clear day", description="Weather condition")
+    season: str = Field(default="spring", description="Season")
+    time_of_day: str = Field(default="daytime", description="Time of day")
+    lighting_clues: str = Field(default="bright ambient lighting", description="Lighting environment")
 
 
 class StoryEvent(BaseModel):

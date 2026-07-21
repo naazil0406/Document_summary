@@ -185,8 +185,66 @@ class GeneralDomain(BaseDomainPack):
         return ["blurry", "low quality", "distorted faces", "bad anatomy"]
 
 
+class EducationDomain(BaseDomainPack):
+    @property
+    def domain_name(self) -> str:
+        return "education"
+
+    def enhance_scene_graph(self, scene_graph: SceneGraph) -> SceneGraph:
+        has_subject = False
+        for node in scene_graph.nodes:
+            if node.node_type == "subject":
+                has_subject = True
+                node.attributes.setdefault("attire", "smart casual professional educator attire")
+            elif node.node_type == "object":
+                if "desk" in node.name.lower() or "board" in node.name.lower():
+                    node.attributes.setdefault("setting", "bright modern classroom learning environment")
+
+        if not has_subject:
+            scene_graph.nodes.insert(0, SceneNode(
+                id="educator_1",
+                name="Teacher / Student Ambassador",
+                node_type="subject",
+                spatial_zone="foreground center-right",
+                attributes={
+                    "clothing": "smart casual educator attire, holding an informative clipboard or tablet",
+                    "action": "leading an engaging awareness discussion with students in a bright classroom setting",
+                    "emotion": "approachable, attentive, encouraging"
+                }
+            ))
+        return scene_graph
+
+    def get_camera_preset(self) -> CameraSpec:
+        return CameraSpec(
+            shot_type="medium eye-level shot",
+            camera_angle="eye level",
+            lens="50mm prime lens",
+            perspective="three-quarter perspective"
+        )
+
+    def get_lighting_preset(self) -> LightingSpec:
+        return LightingSpec(
+            primary_light="bright natural daylight streaming through large classroom windows",
+            color_temperature="4500K warm neutral daylight",
+            shadows="soft ambient daylight shadows",
+            mood="bright, welcoming, educational"
+        )
+
+    def get_style_preset(self) -> StyleSpec:
+        return StyleSpec(
+            rendering_style="clean contemporary photography",
+            medium="35mm professional photography",
+            materials_and_textures=["wooden desks", "whiteboard", "educational posters"],
+            color_palette=["warm oak", "sky blue", "soft teal", "crisp white"]
+        )
+
+    def get_domain_negative_prompts(self) -> List[str]:
+        return ["dark room", "industrial factory", "blurry", "text errors", "garbled letters", "gym workout", "athletic runner"]
+
+
 # Register built-in domain packs
 PluginRegistry.register_domain(WarehouseSafetyDomain())
 PluginRegistry.register_domain(HealthcareDomain())
 PluginRegistry.register_domain(CorporateMarketingDomain())
+PluginRegistry.register_domain(EducationDomain())
 PluginRegistry.register_domain(GeneralDomain())

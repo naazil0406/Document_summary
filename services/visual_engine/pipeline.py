@@ -4,7 +4,7 @@ Full End-to-End Orchestrator Pipeline for the Universal AI Visual Content Engine
 
 import base64
 import logging
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 from services.visual_engine.schemas import (
     UserIntent,
@@ -67,10 +67,12 @@ class UniversalVisualContentEngine:
 
         # Step 2: Knowledge Retrieval (optional)
         retrieved_context = ""
+        retrieved_chunk_dicts = []
         if self.retriever_service:
             try:
                 retrieved_chunks = self.retriever_service.retrieve(intent.raw_request)
-                retrieved_context = "\n".join(chunk.text for chunk in retrieved_chunks)
+                retrieved_chunk_dicts = [{"text": getattr(c, "text", str(c)), "metadata": getattr(c, "metadata", {})} for c in retrieved_chunks]
+                retrieved_context = "\n".join(c.get("text", "") if isinstance(c, dict) else getattr(c, "text", "") for c in retrieved_chunks)
             except Exception as e:
                 logger.warning(f"Retrieval step failed ({e}), continuing without context.")
 
@@ -78,7 +80,8 @@ class UniversalVisualContentEngine:
         logger.info("Step 3: Generating core text content (Single Source of Truth)")
         generated_content: ContentGenerationOutput = self._generate_text_content(
             intent=intent,
-            retrieved_context=retrieved_context
+            retrieved_context=retrieved_context,
+            retrieved_chunks=retrieved_chunk_dicts
         )
 
         # Step 4: Content Analysis Engine
@@ -158,22 +161,28 @@ class UniversalVisualContentEngine:
             image_provider_used=provider_used
         )
 
-    def _generate_text_content(self, intent: UserIntent, retrieved_context: str = "") -> ContentGenerationOutput:
+    def _generate_text_content(self, intent: UserIntent, retrieved_context: str = "", retrieved_chunks: List[dict] = None) -> ContentGenerationOutput:
         """Produces story/lesson content as the single source of truth (100-180 words, incorporating Human Performance Tools)."""
+        retrieved_chunks = retrieved_chunks or []
         if self.llm_service:
             if hasattr(self.llm_service, "generate_learning_content"):
                 try:
                     raw_text = self.llm_service.generate_learning_content(
                         content_type=intent.content_type,
                         topic=intent.raw_request,
-                        chunks=[]
+                        chunks=retrieved_chunks
                     )
-                    return ContentGenerationOutput(
-                        raw_content=raw_text,
-                        title=f"{intent.content_type}: {intent.raw_request}",
-                        core_message=intent.raw_request,
-                        key_takeaways=[]
-                    )
+                    # Check if model generated refusal phrasing
+                    refusal_phrases = ["isn't any specific context", "no specific context available", "provided materials", "please share it"]
+                    if raw_text and not any(phrase in raw_text.lower() for phrase in refusal_phrases):
+                        return ContentGenerationOutput(
+                            raw_content=raw_text,
+                            title=f"{intent.content_type}: {intent.raw_request}",
+                            core_message=intent.raw_request,
+                            key_takeaways=[]
+                        )
+                    else:
+                        logger.warning("LLM returned refusal phrasing in generate_learning_content; forcing custom prompt.")
                 except Exception as exc:
                     logger.warning(f"generate_learning_content failed ({exc}), falling back to raw _call_llm.")
 
@@ -195,9 +204,9 @@ class UniversalVisualContentEngine:
                 f"Target Domain: {intent.domain}\n"
                 f"Communication Purpose: {intent.communication_purpose}\n"
                 f"Retrieved Context: {retrieved_context}\n\n"
-                f"Write 100-180 words for the given Content Type ({intent.content_type}). "
-                f"For Scenario/Story content, use third-person narrative format with named specific character(s) (e.g. Alex, Marcus, Maria) and vivid physical actions. "
-                f"Naturally incorporate one or more Human Performance Tools (such as Rate Your State (RYS), Anticipating Error, Close Calls, Habit Reminder, or RYS Supervisor Conversation)."
+                f"Write 100-180 words of engaging, high-quality content for the given Content Type ({intent.content_type}). "
+                f"Draw on real-world domain knowledge and naturally incorporate one or more Human Performance Tools (such as Rate Your State (RYS), Anticipating Error, Close Calls, Habit Reminder, or RYS Supervisor Conversation). "
+                f"NEVER output refusal messages, meta-explanations, or statements like 'there is no context available'."
             )
 
             raw_text = self.llm_service._call_llm(

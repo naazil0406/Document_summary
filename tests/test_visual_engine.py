@@ -82,11 +82,16 @@ def test_visual_engine_content_type_parsing():
     assert output_recall.intent.content_type == "Recall Card"
     assert output_recall.intent.raw_request == "heatwave awareness"
 
-    output_info = engine.generate_content_and_visual(
-        user_request="Infographic: warehouse forklift safety",
+def test_visual_engine_school_awareness_no_refusal():
+    engine = UniversalVisualContentEngine(llm_service=None, retriever_service=None, image_service=None)
+    output = engine.generate_content_and_visual(
+        user_request="Infographic: school awareness",
         generate_image_bytes=False
     )
-    assert output_info.intent.content_type == "Infographic"
-    assert output_info.intent.style_preference == "infographic_illustration"
+    assert output.intent.domain == "education"
+    assert output.intent.content_type == "Infographic"
+    assert "isn't any specific context" not in output.generated_content.raw_content.lower()
+    assert "provided materials" not in output.generated_content.raw_content.lower()
+    assert output.consistency_report.is_consistent is True
 
 

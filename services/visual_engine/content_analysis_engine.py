@@ -144,17 +144,28 @@ Output ONLY valid JSON matching this exact structure:
         for tool in hpt_tools:
             objects.append(ObjectEntity(name=tool, category="tool", importance="medium", visual_details=f"Enterprise Human Performance Safety Tool: {tool}"))
 
-        # Environment heuristics
+        # Domain-aware environment heuristics
         weather = "hot midday summer heat" if any(w in text.lower() for w in ["sun", "heat", "hot", "summer"]) else "clear indoor environment"
         time_of_day = "midday" if "midday" in text.lower() or "afternoon" in text.lower() else "daytime"
-        
+
+        if domain == "warehouse":
+            loc, btype = "Industrial warehouse loading bay floor", "logistics facility"
+        elif domain == "healthcare":
+            loc, btype = "Clinical consultation room", "medical facility"
+        elif domain == "education":
+            loc, btype = "Bright modern classroom learning environment", "educational campus"
+        elif domain == "corporate":
+            loc, btype = "Executive corporate conference room", "corporate office"
+        else:
+            loc, btype = "Modern professional indoor environment", "commercial facility"
+
         environment = EnvironmentEntity(
-            location="Industrial warehouse loading bay floor",
-            building_type="logistics facility",
+            location=loc,
+            building_type=btype,
             weather=weather,
             season="summer",
             time_of_day=time_of_day,
-            lighting_clues="Intense bright sunlight streaming down from high roof skylights creating high-contrast warm daylight glows"
+            lighting_clues="Bright natural ambient lighting creating clear visibility"
         )
 
         # Story events timeline heuristics

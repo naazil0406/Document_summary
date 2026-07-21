@@ -57,6 +57,8 @@ class IntentAnalyzer:
                 domain = "warehouse"
             elif any(w in request_lower for w in ["doctor", "patient", "hospital", "clinic", "medical", "nurse", "healthcare"]):
                 domain = "healthcare"
+            elif any(w in request_lower for w in ["school", "student", "teacher", "classroom", "education", "campus", "academic"]):
+                domain = "education"
             elif any(w in request_lower for w in ["office", "executive", "meeting", "strategy", "brand", "marketing", "corporate"]):
                 domain = "corporate"
             elif any(w in request_lower for w in ["code", "software", "ai", "cloud", "server", "data center", "tech"]):
