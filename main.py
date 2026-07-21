@@ -1183,64 +1183,133 @@ def generate_learning_feed_item(
             f"Supported types: {', '.join(CONTENT_TYPES)}"
         )
 
-    try:
-        chunks = retriever.retrieve(topic, folders=folders)
-    except Exception as exc:
-        logger.error("Retrieval failed during content generation: %s", exc)
-        raise RuntimeError("An error occurred while retrieving relevant information.") from exc
-
-    if not chunks:
-        raise ValueError(
-            f"No relevant context was found in the indexed documents for topic: {topic}. "
-            "Upload and process the relevant document first."
-        )
-
-    # Look up everything previously generated for this exact
-    # (content_type, topic) pair (across past requests, not just this
-    # batch) so repeat calls — e.g. clicking "regenerate" on the same
-    # topic — pick a different fact/angle/phrasing instead of converging
-    # on the same wording each time.
-    history_key = _content_history_key(content_type, topic)
-    avoid_repeating = _load_content_history(history_key)
-
-    content_text = content_llm.generate_learning_content(
-        content_type,
-        topic,
-        chunks,
-        monthly_topic_content=monthly_topic_content,
-        common_data=common_data,
-        web_results=web_results,
-        avoid_repeating=avoid_repeating or None,
+    # Invoke Universal Visual Content Engine
+    engine = get_visual_engine()
+    engine_output = engine.generate_content_and_visual(
+        user_request=f"{content_type}: {topic}",
+        domain_override=None,
+        style_override="commercial_photography" if content_type in _SCENE_MODE_CONTENT_TYPES else "infographic_illustration",
+        aspect_ratio="16:9",
+        generate_image_bytes=True if image_gen_service else False
     )
 
-    # Persist this generation both as a standalone local file and into the
-    # history used to steer future generations for this same pair away
-    # from repeating it.
+    content_text = engine_output.generated_content.raw_content
+    image_prompt = engine_output.prompt_spec.positive_prompt
+    image_b64 = engine_output.image_bytes_base64 or ""
+
+    # Save content text to disk
     content_saved_path = save_generated_content(content_text, content_type, topic)
+    history_key = _content_history_key(content_type, topic)
     _append_content_history(history_key, content_text)
 
-    # The Image Prompt Generation Agent (Nova Lite) is driven by what the
-    # content actually says, not just the bare topic, so the image matches
-    # the specific fact/scenario/question generated above. Which visual
-    # strategy it uses (photorealistic scene vs. flat-vector infographic)
-    # is chosen explicitly by content_type, not inferred from wording.
-    image_mode = _image_mode_for_content_type(content_type)
-    image_query = f"{content_type} about \"{topic}\": {content_text}"
-    image_prompt = image_prompt_llm.generate_image_prompt(image_query, chunks, mode=image_mode)
+    # Save image to disk if base64 bytes exist
+    saved_path = ""
+    if image_b64:
+        try:
+            img_bytes = base64.b64decode(image_b64)
+            saved_path = save_generated_image(img_bytes, label=f"{content_type}_{topic[:30]}")
+        except Exception as exc:
+            logger.warning(f"Could not save generated image to disk: {exc}")
 
-    negative_prompt = _negative_prompt_for_mode(image_mode)
-    image_bytes = image_gen_service.generate_image(image_prompt, negative_prompt=negative_prompt)
-    saved_path = save_generated_image(image_bytes, label=f"{content_type}_{topic[:30]}")
+    # Write sidecar JSON metadata for persistence across restarts
+    item_id = os.path.basename(content_saved_path).replace(".txt", "")
+    json_path = os.path.join(settings.GENERATED_CONTENT_DIR, f"{item_id}.json")
+    created_at = datetime.now().isoformat()
+    meta = {
+        "id": item_id,
+        "content_type": content_type,
+        "topic": topic,
+        "content_text": content_text,
+        "image_prompt": image_prompt,
+        "image_saved_path": saved_path,
+        "created_at": created_at,
+    }
+    try:
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2, ensure_ascii=False)
+    except Exception as exc:
+        logger.warning(f"Could not save sidecar metadata for {item_id}: {exc}")
 
     return {
+        "id": item_id,
         "content_type": content_type,
         "topic": topic,
         "content_text": content_text,
         "content_saved_path": content_saved_path,
         "image_prompt": image_prompt,
-        "image_base64": base64.b64encode(image_bytes).decode("utf-8"),
+        "image_base64": image_b64,
         "saved_path": saved_path,
+        "created_at": created_at,
     }
+
+
+def _list_saved_learning_content() -> List[dict]:
+    """Every generated learning content item saved on disk, oldest first."""
+    folder = settings.GENERATED_CONTENT_DIR
+    if not os.path.isdir(folder):
+        return []
+
+    entries = []
+    for filename in os.listdir(folder):
+        if filename.endswith(".json") and not filename.startswith("_"):
+            path = os.path.join(folder, filename)
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                img_b64 = ""
+                img_path = meta.get("image_saved_path", "")
+                if img_path and os.path.isfile(img_path):
+                    with open(img_path, "rb") as img_f:
+                        img_b64 = base64.b64encode(img_f.read()).decode("utf-8")
+                entries.append({
+                    "id": meta.get("id", filename[:-5]),
+                    "content_type": meta.get("content_type", "Scenario"),
+                    "topic": meta.get("topic", "Learning Content"),
+                    "content_text": meta.get("content_text", ""),
+                    "image_prompt": meta.get("image_prompt", ""),
+                    "image_base64": img_b64,
+                    "created_at": meta.get("created_at", datetime.fromtimestamp(os.path.getmtime(path)).isoformat()),
+                })
+            except Exception:
+                continue
+        elif filename.endswith(".txt") and not filename.startswith("_"):
+            txt_path = os.path.join(folder, filename)
+            json_counterpart = txt_path.replace(".txt", ".json")
+            if os.path.exists(json_counterpart):
+                continue
+            try:
+                with open(txt_path, "r", encoding="utf-8") as f:
+                    text_content = f.read()
+                parts = filename.replace("generated_", "").replace(".txt", "").split("_")
+                c_type = parts[0] if parts else "Scenario"
+                topic_str = " ".join(parts[1:-2]) if len(parts) > 3 else "Learning Content"
+
+                img_b64 = ""
+                if os.path.isdir(settings.GENERATED_IMAGES_DIR):
+                    for img_file in os.listdir(settings.GENERATED_IMAGES_DIR):
+                        if img_file.endswith(".png"):
+                            full_img = os.path.join(settings.GENERATED_IMAGES_DIR, img_file)
+                            try:
+                                with open(full_img, "rb") as img_f:
+                                    img_b64 = base64.b64encode(img_f.read()).decode("utf-8")
+                                break
+                            except Exception:
+                                pass
+
+                entries.append({
+                    "id": filename.replace(".txt", ""),
+                    "content_type": c_type,
+                    "topic": topic_str or "Learning Content",
+                    "content_text": text_content,
+                    "image_prompt": "Universal Visual Engine Scene Graph Prompt",
+                    "image_base64": img_b64,
+                    "created_at": datetime.fromtimestamp(os.path.getmtime(txt_path)).isoformat(),
+                })
+            except Exception:
+                continue
+
+    entries.sort(key=lambda e: e["created_at"])
+    return entries
 
 
 def summarize_indexed_document(name: str, qdrant_service, summary_llm) -> str:
@@ -2083,6 +2152,12 @@ def generate_content(req: ContentGenRequest):
         raise HTTPException(500, "An error occurred while generating the content.")
 
     return ContentGenResponse(**result)
+
+
+@app.get("/api/learning-content")
+def list_learning_content():
+    """Returns all saved learning content items from disk for the UI rail."""
+    return {"learning_content": _list_saved_learning_content()}
 
 
 @app.get("/api/folders")
