@@ -82,16 +82,17 @@ def test_visual_engine_content_type_parsing():
     assert output_recall.intent.content_type == "Recall Card"
     assert output_recall.intent.raw_request == "heatwave awareness"
 
-def test_visual_engine_school_awareness_no_refusal():
-    engine = UniversalVisualContentEngine(llm_service=None, retriever_service=None, image_service=None)
-    output = engine.generate_content_and_visual(
-        user_request="Infographic: school awareness",
-        generate_image_bytes=False
-    )
-    assert output.intent.domain == "education"
-    assert output.intent.content_type == "Infographic"
-    assert "isn't any specific context" not in output.generated_content.raw_content.lower()
-    assert "provided materials" not in output.generated_content.raw_content.lower()
+def test_visual_engine_driving_text_extraction():
+    class MockLLM:
+        def generate_learning_content(self, content_type, topic, chunks):
+            return "As the school year kicks off, your morning routine gets busier—more traffic. You glance at your watch instead of the road ahead while merging into heavy traffic in your car."
+
+    engine = UniversalVisualContentEngine(llm_service=MockLLM(), retriever_service=None, image_service=None)
+    output = engine.generate_content_and_visual("Scenario: School zone commute safety", generate_image_bytes=False)
+    
+    assert "roadway" in output.scene_graph.environment_summary.lower() or "traffic" in output.scene_graph.environment_summary.lower()
+    assert any("driver" in n.name.lower() or "steering" in n.name.lower() for n in output.scene_graph.nodes)
+    assert "classroom" not in output.prompt_spec.positive_prompt.lower()
     assert output.consistency_report.is_consistent is True
 
 

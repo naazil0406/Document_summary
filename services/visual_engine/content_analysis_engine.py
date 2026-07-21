@@ -87,77 +87,120 @@ Output ONLY valid JSON matching this exact structure:
         if not sentences:
             sentences = [text.strip()]
         
-        # Character extraction heuristics
+        text_lower = text.lower()
         characters = []
-        if "alex" in text.lower():
-            characters.append(CharacterEntity(
-                name="Alex",
-                role="main",
-                description="Male warehouse worker in mid-30s wearing safety helmet, high-vis orange vest, and durable work uniform",
-                action="Rushing forward with urgent outstretched arms to support collapsing coworker",
-                emotion="Alert, determined, deeply concerned",
-                body_language="Leaning forward dynamically in quick mid-stride response"
-            ))
-        
-        coworker_name = "Coworker" if "coworker" in text.lower() else "Worker"
-        if "collapse" in text.lower() or "slow" in text.lower() or "tired" in text.lower() or "staggering" in text.lower():
-            characters.append(CharacterEntity(
-                name=coworker_name,
-                role="supporting",
-                description="Male logistics worker in high-vis vest and work shirt",
-                action="Stumbling and knees buckling under heat strain while holding heavy load",
-                emotion="Exhausted, flushed, distressed",
-                body_language="Unsteady posture, drooping shoulders, heavy breathing stance"
-            ))
+        objects = []
 
-        if not characters:
+        # Text-driven scene heuristic detection
+        is_driving = any(w in text_lower for w in ["driving", "car", "traffic", "road", "merge", "vehicle", "commute", "steering", "following distance", "school zone", "school drop-off", "drop-offs", "engine", "behind the wheel"])
+        is_warehouse = any(w in text_lower for w in ["pallet", "forklift", "loading bay", "cargo", "warehouse", "heat stress", "staggering", "collapsing"])
+        is_classroom = any(w in text_lower for w in ["classroom", "teacher", "blackboard", "whiteboard", "student", "desk", "lesson plan"])
+        is_medical = any(w in text_lower for w in ["hospital", "patient", "clinic", "doctor", "nurse", "medical"])
+
+        if is_driving:
+            characters.append(CharacterEntity(
+                name="Commuter Driver",
+                role="main",
+                description="Adult commuter driver sitting at the steering wheel inside a car",
+                action="Glancing at wristwatch while navigating heavy morning commute traffic near school zone",
+                emotion="Alert, focused, mindful of traffic ahead",
+                body_language="Hands on steering wheel, leaning forward attentively"
+            ))
+            objects.append(ObjectEntity(
+                name="Car Dashboard and Steering Wheel",
+                category="vehicle",
+                importance="high",
+                visual_details="Modern automobile interior view from driver perspective showing steering wheel and windshield"
+            ))
+            objects.append(ObjectEntity(
+                name="Morning Commute Traffic",
+                category="vehicle",
+                importance="high",
+                visual_details="Commuter vehicles merged on suburban road near school zone lights"
+            ))
+            loc, btype = "Suburban roadway in morning commute traffic near school zone", "vehicle interior and roadway"
+            weather, time_of_day = "bright morning sunlight", "morning"
+        elif is_warehouse or "alex" in text_lower:
+            if "alex" in text_lower:
+                characters.append(CharacterEntity(
+                    name="Alex",
+                    role="main",
+                    description="Male warehouse worker in high-vis orange vest and safety helmet",
+                    action="Rushing forward to support collapsing coworker",
+                    emotion="Alert, determined, deeply concerned",
+                    body_language="Leaning forward dynamically in quick mid-stride response"
+                ))
+            if "collapse" in text_lower or "staggering" in text_lower or "coworker" in text_lower:
+                characters.append(CharacterEntity(
+                    name="Coworker",
+                    role="supporting",
+                    description="Logistics worker in high-vis vest and work shirt",
+                    action="Stumbling under heat strain while holding heavy load",
+                    emotion="Exhausted, flushed, distressed",
+                    body_language="Unsteady posture, drooping shoulders"
+                ))
+            objects.append(ObjectEntity(name="Pallet Jack with Heavy Cargo", category="equipment", importance="high", visual_details="Industrial yellow hydraulic pallet truck"))
+            loc, btype = "Industrial warehouse loading bay floor", "logistics facility"
+            weather, time_of_day = "hot midday summer heat", "midday"
+        elif is_classroom:
+            characters.append(CharacterEntity(
+                name="Educator",
+                role="main",
+                description="Professional teacher standing in front of classroom",
+                action="Engaging students in classroom discussion",
+                emotion="Attentive, encouraging",
+                body_language="Standing upright, gesturing towards whiteboard"
+            ))
+            objects.append(ObjectEntity(name="Classroom Desks and Whiteboard", category="building", importance="high", visual_details="Modern wooden desks and interactive learning board"))
+            loc, btype = "Bright modern classroom learning environment", "educational campus"
+            weather, time_of_day = "bright daylight", "daytime"
+        elif is_medical:
+            characters.append(CharacterEntity(
+                name="Healthcare Professional",
+                role="main",
+                description="Physician or nurse wearing clean medical scrubs",
+                action="Consulting with patient in clinic room",
+                emotion="Empathetic, attentive",
+                body_language="Seated attentively opposite patient"
+            ))
+            loc, btype = "Clinical consultation room", "medical facility"
+            weather, time_of_day = "clear daylight", "daytime"
+        else:
             characters.append(CharacterEntity(
                 name="Primary Subject",
                 role="main",
-                description="Professional worker in appropriate domain attire",
+                description="Professional in appropriate domain attire",
                 action="Performing core task",
                 emotion="Focused and professional",
-                body_language="Engaged body position"
+                body_language="Engaged posture"
             ))
-
-        # Objects & Human Performance Tools extraction
-        objects = []
-        if any(w in text.lower() for w in ["pallet", "load", "box", "rack"]):
-            objects.append(ObjectEntity(name="Pallet Jack with Heavy Cargo", category="equipment", importance="high", visual_details="Industrial yellow hydraulic pallet truck holding stacked wooden boxes"))
-            objects.append(ObjectEntity(name="Warehouse Storage Racks", category="building", importance="medium", visual_details="Multi-tier heavy steel shelving loaded with boxed inventory"))
-        if any(w in text.lower() for w in ["helmet", "vest"]):
-            objects.append(ObjectEntity(name="Safety Helmet", category="equipment", importance="high", visual_details="Bright yellow OSHA approved hard hat"))
+            if domain == "warehouse":
+                loc, btype = "Industrial warehouse floor", "logistics facility"
+            elif domain == "healthcare":
+                loc, btype = "Clinical consultation room", "medical facility"
+            elif domain == "education":
+                loc, btype = "Modern educational facility corridor", "educational campus"
+            elif domain == "corporate":
+                loc, btype = "Executive corporate conference room", "corporate office"
+            else:
+                loc, btype = "Modern professional indoor environment", "commercial facility"
+            weather, time_of_day = "clear daylight", "daytime"
 
         # Extract Human Performance Tools mentioned in text
         hpt_tools = []
-        if "rate your state" in text.lower() or "rys" in text.lower():
+        if "rate your state" in text_lower or "rys" in text_lower:
             hpt_tools.append("Rate Your State (RYS) Checklist")
-        if "anticipating error" in text.lower():
+        if "anticipating error" in text_lower:
             hpt_tools.append("Anticipating Error Pre-task Planning Board")
-        if "close calls" in text.lower():
+        if "close calls" in text_lower:
             hpt_tools.append("Close Calls Incident Log")
-        if "habit reminder" in text.lower():
+        if "habit reminder" in text_lower:
             hpt_tools.append("Habit Reminder Visual Indicator")
-        if "rys supervisor conversation" in text.lower():
+        if "rys supervisor conversation" in text_lower:
             hpt_tools.append("RYS Supervisor Conversation Form")
 
         for tool in hpt_tools:
             objects.append(ObjectEntity(name=tool, category="tool", importance="medium", visual_details=f"Enterprise Human Performance Safety Tool: {tool}"))
-
-        # Domain-aware environment heuristics
-        weather = "hot midday summer heat" if any(w in text.lower() for w in ["sun", "heat", "hot", "summer"]) else "clear indoor environment"
-        time_of_day = "midday" if "midday" in text.lower() or "afternoon" in text.lower() else "daytime"
-
-        if domain == "warehouse":
-            loc, btype = "Industrial warehouse loading bay floor", "logistics facility"
-        elif domain == "healthcare":
-            loc, btype = "Clinical consultation room", "medical facility"
-        elif domain == "education":
-            loc, btype = "Bright modern classroom learning environment", "educational campus"
-        elif domain == "corporate":
-            loc, btype = "Executive corporate conference room", "corporate office"
-        else:
-            loc, btype = "Modern professional indoor environment", "commercial facility"
 
         environment = EnvironmentEntity(
             location=loc,

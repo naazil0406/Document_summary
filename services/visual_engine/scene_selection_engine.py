@@ -32,8 +32,11 @@ class SceneSelectionEngine:
             logger.info(f"Selected climax event via explicit tag: Step {selected.step_number} - '{selected.event_description}'")
             return selected
 
-        # 2. Evaluate drama/climax keywords
-        drama_keywords = ["collapse", "fall", "emergency", "rescue", "rush", "spill", "accident", "strike", "break", "breakthrough"]
+        # 2. Evaluate drama/climax visual action keywords
+        drama_keywords = [
+            "collapse", "fall", "emergency", "rescue", "rush", "spill", "accident", "strike", "break",
+            "glance", "watch", "traffic", "merge", "driving", "road", "steering", "car", "behind the wheel"
+        ]
         for e in events:
             if any(kw in e.event_description.lower() for kw in drama_keywords):
                 e.is_climax = True
