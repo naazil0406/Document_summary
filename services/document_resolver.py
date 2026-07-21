@@ -109,12 +109,13 @@ def _part_number(value: str) -> Optional[str]:
     return match.group(1) if match else None
 
 
-def _legacy_fuzzy_match(reference: str, reference_words: list[str], filenames: List[str]) -> Optional[str]:
-    """Fuzzy word-overlap matching against every candidate's filename stem
-    (canonical or not) -- for canonical names this matches against the
-    original-name portion carried in "<original name> - 123456"."""
+def _score_candidates(reference: str, reference_words: list[str], filenames: List[str]) -> list[tuple[int, str]]:
+    """Score every candidate's filename stem against the reference, reusing
+    the exact same scoring rules as _legacy_fuzzy_match. Returns all scored
+    (score, filename) pairs, sorted highest-first, so callers can both pick
+    a single winner and detect/report genuine ties."""
     if not reference_words or not filenames:
-        return None
+        return []
 
     reference_phrase = " ".join(reference_words)
     reference_compact = "".join(reference_words)
@@ -168,10 +169,17 @@ def _legacy_fuzzy_match(reference: str, reference_words: list[str], filenames: L
 
         scored.append((score, filename))
 
+    scored.sort(reverse=True)
+    return scored
+
+
+def _legacy_fuzzy_match(reference: str, reference_words: list[str], filenames: List[str]) -> Optional[str]:
+    """Fuzzy word-overlap matching against every candidate's filename stem
+    (canonical or not) -- for canonical names this matches against the
+    original-name portion carried in "<original name> - 123456"."""
+    scored = _score_candidates(reference, reference_words, filenames)
     if not scored:
         return None
-
-    scored.sort(reverse=True)
     if len(scored) > 1 and scored[0][0] == scored[1][0]:
         return None
     return scored[0][1]
@@ -205,12 +213,26 @@ def resolve_pdf_reference(reference: str, filenames: Iterable[str]) -> Optional[
 
 
 def ambiguous_candidates(reference: str, filenames: Iterable[str]) -> List[str]:
-    """Kept for backward compatibility with callers. Since resolution no
-    longer groups documents by a shared unit number, there is no longer a
-    structural "genuine tie" case to detect here -- ties are already
-    handled (and reported as unresolved) inside resolve_pdf_reference /
-    _legacy_fuzzy_match. Always returns an empty list."""
-    return []
+    """Return every filename tied for the top match score, so the caller
+    can list them out for the user to pick from (e.g. multiple "Unit 1"
+    documents). Returns [] when there's a unique winner or no match at all."""
+    candidates = [name for name in filenames if name.lower().endswith(_DOC_EXTENSIONS)]
+    if not candidates:
+        return []
+
+    # A reference containing an explicit unique id is unambiguous by
+    # definition -- it resolves to exactly one document or none.
+    if _reference_unique_id(reference):
+        return []
+
+    reference_words = _reference_words(reference)
+    scored = _score_candidates(reference, reference_words, candidates)
+    if len(scored) < 2:
+        return []
+
+    top_score = scored[0][0]
+    tied = [filename for score, filename in scored if score == top_score]
+    return tied if len(tied) > 1 else []
 
 
 def resolve_summary_request(

@@ -271,6 +271,7 @@ PDFs are handled automatically.
 ```bash
 streamlit run app.py
 ```
+uvicorn main:app --reload --port 8000
 
 Opens at http://localhost:8501. Upload a PDF in the sidebar → it's
 ingested, summarized, and 3 follow-up questions are suggested. Type any

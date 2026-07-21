@@ -73,6 +73,10 @@ class QdrantService:
                     # original S3/local filename, never the display label.
                     "filename": chunk.filename,
                     "original_filename": chunk.filename,
+                    # Permanent internal document identifier (UUIDv7) --
+                    # never shown to users. See services/uuid7.py and
+                    # main.py's _get_or_create_document_id().
+                    "document_id": (chunk.metadata or {}).get("document_id", ""),
                     "canonical_name": (chunk.metadata or {}).get(
                         "canonical_name", canonical_display_name(chunk.filename)
                     ),
@@ -104,6 +108,82 @@ class QdrantService:
             logger.info("Upserted %d points into '%s'.", len(points), self.collection_name)
         except Exception as exc:
             logger.error("Failed to upsert points into Qdrant: %s", exc)
+            raise
+
+    def get_document_id(self, filename: str) -> Optional[str]:
+        """Return the document_id already stored for `filename`, or None if
+        the document isn't indexed yet or predates the UUIDv7 migration.
+
+        Used both by ingestion (to reuse the existing id when re-indexing
+        an already-known document instead of generating a new one) and by
+        the one-time migration (to skip documents that already have one).
+        """
+        try:
+            batch, _offset = self.client.scroll(
+                collection_name=self.collection_name,
+                scroll_filter=qdrant_models.Filter(
+                    must=[
+                        qdrant_models.FieldCondition(
+                            key="filename",
+                            match=qdrant_models.MatchValue(value=filename),
+                        )
+                    ]
+                ),
+                limit=1,
+                with_payload=["document_id"],
+                with_vectors=False,
+            )
+        except Exception as exc:
+            if "doesn't exist" in str(exc) or "Not found" in str(exc):
+                return None
+            logger.error("Failed to look up document_id for '%s': %s", filename, exc)
+            raise
+        if not batch:
+            return None
+        document_id = (batch[0].payload or {}).get("document_id", "")
+        return document_id or None
+
+    def set_document_id_for_filename(self, filename: str, document_id: str) -> int:
+        """Stamp `document_id` onto every existing point (chunks and TOC
+        entries) for `filename`, without touching text, vectors, or any
+        other metadata. Returns the number of points updated.
+
+        This is a plain in-place payload update via the same
+        FilterSelector + set_payload pattern used by rename_document() /
+        enrich_document_metadata() -- it never re-parses, re-chunks, or
+        re-embeds anything, satisfying the one-time-migration requirement
+        of only ever touching metadata.
+        """
+        if not filename or not document_id:
+            raise ValueError("filename and document_id are required")
+        selector = qdrant_models.FilterSelector(
+            filter=qdrant_models.Filter(
+                must=[
+                    qdrant_models.FieldCondition(
+                        key="filename",
+                        match=qdrant_models.MatchValue(value=filename),
+                    )
+                ]
+            )
+        )
+        try:
+            count = self.client.count(
+                collection_name=self.collection_name,
+                count_filter=selector.filter,
+                exact=True,
+            ).count
+            if count:
+                self.client.set_payload(
+                    collection_name=self.collection_name,
+                    payload={"document_id": document_id},
+                    points=selector,
+                    wait=True,
+                )
+            return count
+        except Exception as exc:
+            logger.error(
+                "Failed to set document_id for '%s': %s", filename, exc
+            )
             raise
 
     def delete_document(self, filename: str) -> None:
@@ -164,6 +244,7 @@ class QdrantService:
                         "page_end": entry["page_end"],
                         "filename": entry["filename"],
                         "original_filename": entry["filename"],
+                        "document_id": entry.get("document_id", ""),
                         "canonical_name": entry.get("canonical_name", canonical_display_name(entry["filename"])),
                         "s3_key": entry.get("s3_key", entry["filename"]),
                     },
@@ -244,6 +325,37 @@ class QdrantService:
                 }
             )
         return hits
+
+    def list_all_filenames(self) -> List[str]:
+        """Return every distinct non-empty `filename` currently indexed,
+        across both content chunks and TOC entries. Used by the one-time
+        document_id migration to enumerate exactly what needs a UUIDv7,
+        independent of whatever happens to be sitting in the local
+        PDF_FOLDER at migration time.
+        """
+        filenames: set = set()
+        offset = None
+        try:
+            while True:
+                batch, offset = self.client.scroll(
+                    collection_name=self.collection_name,
+                    limit=256,
+                    offset=offset,
+                    with_payload=["filename"],
+                    with_vectors=False,
+                )
+                for record in batch:
+                    filename = (record.payload or {}).get("filename", "")
+                    if filename:
+                        filenames.add(filename)
+                if offset is None:
+                    break
+        except Exception as exc:
+            if "doesn't exist" in str(exc) or "Not found" in str(exc):
+                return []
+            logger.warning("Could not list indexed filenames: %s", exc)
+            return []
+        return sorted(filenames)
 
     def list_folders(self) -> List[str]:
         """Return every distinct non-empty `folder` value currently indexed.
@@ -440,11 +552,19 @@ class QdrantService:
                 if offset is None:
                     break
         except Exception as exc:
-            logger.error(
-                "Qdrant document retrieval failed for %s: %s",
-                filename,
-                exc,
-            )
+            if "doesn't exist" in str(exc) or "Not found" in str(exc):
+                logger.info(
+                    "Qdrant collection '%s' doesn't exist yet (expected on a "
+                    "fresh setup) -- treating '%s' as not yet indexed.",
+                    self.collection_name,
+                    filename,
+                )
+            else:
+                logger.error(
+                    "Qdrant document retrieval failed for %s: %s",
+                    filename,
+                    exc,
+                )
             raise
 
         hits = []
@@ -458,6 +578,7 @@ class QdrantService:
                     "score": 1.0,
                     "text": text,
                     "filename": payload.get("filename", ""),
+                    "document_id": payload.get("document_id", ""),
                     "page_start": payload.get("page_start", -1),
                     "page_end": payload.get("page_end", -1),
                     "page_label": payload.get("page_label", "N/A"),

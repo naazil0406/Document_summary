@@ -814,7 +814,7 @@ class BaseLLMService:
             tips.append(tip)
         return tips
 
-    def generate_video_and_story(self, learning_objectives: str, chunks: List[dict]) -> Tuple[str, str, str]:
+    def generate_video_and_story(self, learning_objectives: str, chunks: List[dict], scenario_hint: str = None) -> Tuple[str, str, str]:
         """Generate the dual Video Script + Story training output
         (the 'DUAL-OUTPUT MODE' section of prompts/presentation_prompt.txt)
         in a single LLM call, then split the response into
@@ -825,6 +825,12 @@ class BaseLLMService:
 
         No topic is passed in — the model selects whatever topic/lesson the
         Knowledge Base content best supports on its own.
+
+        scenario_hint: optional one-line user-supplied workplace/scenario
+        description (e.g. "a forklift near-miss in a cold-storage
+        warehouse"). Left blank/None, "Not specified" is sent instead, and
+        the prompt's own DUAL-OUTPUT MODE instructions tell the model to
+        invent a fitting incident freely in that case.
 
         Unlike the QA/summary prompt pairs, this template embeds learning
         objectives and retrieved Knowledge Base content directly via
@@ -844,6 +850,7 @@ class BaseLLMService:
             # RIGHT PANEL story share the same invented character/incident.
             seed_character_name=seed_character_name,
             seed_workplace=seed_workplace,
+            seed_scenario=scenario_hint.strip() if scenario_hint and scenario_hint.strip() else "Not specified",
         )
         user_prompt = "Generate the LEFT PANEL video script and the RIGHT PANEL story now, following the required format exactly."
         raw_output = self._call_llm(system_prompt, user_prompt)

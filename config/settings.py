@@ -33,8 +33,8 @@ class Settings:
     # fetched back down from S3 into PDF_FOLDER as a local working cache.
     # If S3_BUCKET_NAME is unset, the app runs local-folder-only — no
     # boto3 calls are made and no AWS credentials are required.) ---
-    AWS_ACCESS_KEY_ID: str = os.getenv("AWS_ACCESS_KEY_ID", "")
-    AWS_SECRET_ACCESS_KEY: str = os.getenv("AWS_SECRET_ACCESS_KEY", "")
+    AWS_ACCESS_KEY_ID: str = os.getenv("AWS_ACCESS_KEY_ID", "").strip()
+    AWS_SECRET_ACCESS_KEY: str = os.getenv("AWS_SECRET_ACCESS_KEY", "").strip()
     AWS_REGION: str = os.getenv("AWS_REGION", "us-east-1")
     S3_BUCKET_NAME: str = os.getenv("S3_BUCKET_NAME", "")
     S3_PREFIX: str = os.getenv("S3_PREFIX", "documents/")
@@ -156,6 +156,15 @@ class Settings:
     #   "aws": Amazon Bedrock Nova Canvas — requires AWS credentials and
     #     Bedrock model access; kept as an opt-in alternative.
     IMAGE_PROVIDER: str = os.getenv("IMAGE_PROVIDER", "huggingface")
+
+    # --- Separate AWS account for the image pipeline (Nova Lite prompt step +
+    # Nova Canvas render step), used only when IMAGE_PROVIDER == "aws". Falls
+    # back to the main AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/BEDROCK_REGION
+    # above if these are left blank, so setting IMAGE_PROVIDER=aws alone still
+    # works for anyone using one shared account. ---
+    AWS_IMAGE_ACCESS_KEY_ID: str = (os.getenv("AWS_IMAGE_ACCESS_KEY_ID", "").strip() or os.getenv("AWS_ACCESS_KEY_ID", "").strip())
+    AWS_IMAGE_SECRET_ACCESS_KEY: str = (os.getenv("AWS_IMAGE_SECRET_ACCESS_KEY", "").strip() or os.getenv("AWS_SECRET_ACCESS_KEY", "").strip())
+    AWS_IMAGE_REGION: str = os.getenv("AWS_IMAGE_REGION", "").strip() or os.getenv("BEDROCK_REGION", os.getenv("AWS_REGION", "us-east-1"))
 
     # Hugging Face / FLUX.1-dev settings (used when IMAGE_PROVIDER == "huggingface")
     HF_TOKEN: str = os.getenv("HF_TOKEN", "")

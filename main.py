@@ -46,6 +46,7 @@ from services.s3_storage import S3Storage
 from services.chunking import Chunk, chunk_extracted_pages, chunk_pages_legacy
 from services.embeddings import EmbeddingService
 from services.qdrant_db import QdrantService
+from services.uuid7 import uuid7_str
 from services.retriever import Retriever, SUMMARY_KEYWORDS
 from services.llm_service import (
     FALLBACK_ANSWER,
@@ -200,9 +201,9 @@ def get_image_prompt_llm() -> BedrockLLMService:
         model=settings.BEDROCK_IMAGE_PROMPT_MODEL,
         max_tokens=settings.IMAGE_PROMPT_MAX_TOKENS,
         temperature=settings.IMAGE_PROMPT_TEMPERATURE,
-        region_name=settings.BEDROCK_REGION,
-        aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-        aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+        region_name=settings.AWS_IMAGE_REGION,
+        aws_access_key_id=settings.AWS_IMAGE_ACCESS_KEY_ID,
+        aws_secret_access_key=settings.AWS_IMAGE_SECRET_ACCESS_KEY,
     )
 
 
@@ -219,9 +220,9 @@ def get_image_gen_service():
     if settings.IMAGE_PROVIDER == "aws":
         return NovaCanvasService(
             model=settings.BEDROCK_IMAGE_GEN_MODEL,
-            region_name=settings.BEDROCK_REGION,
-            aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+            region_name=settings.AWS_IMAGE_REGION,
+            aws_access_key_id=settings.AWS_IMAGE_ACCESS_KEY_ID,
+            aws_secret_access_key=settings.AWS_IMAGE_SECRET_ACCESS_KEY,
             width=settings.IMAGE_WIDTH,
             height=settings.IMAGE_HEIGHT,
             quality=settings.IMAGE_QUALITY,
@@ -272,43 +273,37 @@ def get_presentation_llm() -> OpenRouterLLMService:
 # Orchestration logic — ported 1:1 from app.py, with st.* calls removed.
 # ===========================================================================
 def _list_all_documents(pdf_folder: str) -> List[str]:
-    """Basenames of every supported document under pdf_folder -- both
-    legacy flat files directly in pdf_folder and files inside a month
-    subfolder (e.g. pdf_folder/july/<file>). Identifiers used throughout
-    the app (Qdrant, cache, UI) are always the bare filename; which month
-    subfolder a file physically lives in is an on-disk storage detail."""
+    """Basenames of every supported document under pdf_folder, at any
+    nesting depth -- legacy flat files directly in pdf_folder, files inside
+    a single month subfolder (e.g. pdf_folder/july/<file>), and files
+    nested further still (e.g. pdf_folder/<synced-folder>/<subfolder>/<file>,
+    as happens when an S3 prefix folder itself contains subfolders).
+    Identifiers used throughout the app (Qdrant, cache, UI) are always the
+    bare filename; how deep a file physically sits on disk is a storage
+    detail only."""
     found: set[str] = set()
-    try:
-        for entry in os.listdir(pdf_folder):
-            full = os.path.join(pdf_folder, entry)
-            if os.path.isfile(full):
-                if entry.lower().endswith(SUPPORTED_EXTENSIONS):
-                    found.add(entry)
-            elif os.path.isdir(full):
-                for f in os.listdir(full):
-                    if f.lower().endswith(SUPPORTED_EXTENSIONS):
-                        found.add(f)
-    except OSError:
-        pass
+    for root, _dirs, files in os.walk(pdf_folder):
+        for f in files:
+            if f.lower().endswith(SUPPORTED_EXTENSIONS):
+                found.add(f)
     return sorted(found)
 
 
 def local_read_path(filename: str) -> str:
-    """Resolve `filename` to wherever it actually lives on disk: inside a
-    month subfolder (current convention) or directly in PDF_FOLDER (legacy
-    files saved before month folders existed). Falls back to the flat
-    PDF_FOLDER path if the file isn't found anywhere, so callers still get
-    a sensible path to report as missing."""
+    """Resolve `filename` to wherever it actually lives on disk: nested any
+    number of levels deep (e.g. a synced S3 folder containing subfolders),
+    inside a single month subfolder (current convention), or directly in
+    PDF_FOLDER (legacy files saved before month folders existed). Falls
+    back to the flat PDF_FOLDER path if the file isn't found anywhere, so
+    callers still get a sensible path to report as missing."""
     root = settings.PDF_FOLDER
     flat = os.path.join(root, filename)
     if os.path.isfile(flat):
         return flat
     if os.path.isdir(root):
-        for entry in os.listdir(root):
-            month_dir = os.path.join(root, entry)
-            candidate = os.path.join(month_dir, filename)
-            if os.path.isdir(month_dir) and os.path.isfile(candidate):
-                return candidate
+        for dirpath, _dirs, files in os.walk(root):
+            if filename in files:
+                return os.path.join(dirpath, filename)
     return flat
 
 
@@ -476,9 +471,26 @@ def parse_and_chunk(
     return _tag_folder(chunks or None, folder)
 
 
+def _get_or_create_document_id(filename: str, qdrant_service) -> str:
+    """Return the permanent UUIDv7 document_id for `filename`.
+
+    Re-indexing (the document was already indexed before, under this same
+    filename) reuses its existing document_id unchanged. A genuinely new
+    document -- including a filename that was previously deleted and is
+    now being uploaded fresh -- gets a brand-new UUIDv7, since
+    get_document_id() correctly returns None once delete_document() has
+    removed every point that used to carry the old id.
+    """
+    existing = qdrant_service.get_document_id(filename)
+    if existing:
+        return existing
+    return uuid7_str()
+
+
 def _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service, path_meta: Optional[dict] = None) -> None:
     filename = chunks[0].filename
     path_meta = path_meta or {}
+    document_id = _get_or_create_document_id(filename, qdrant_service)
     for chunk in chunks:
         metadata = dict(chunk.metadata or {})
         metadata.update({
@@ -489,6 +501,8 @@ def _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service, path
             "folder": path_meta.get("folder") or metadata.get("folder") or "",
             "subfolder": path_meta.get("subfolder") or metadata.get("subfolder") or "",
             "local_path": local_read_path(filename),
+            # Permanent internal identifier — never displayed to users.
+            "document_id": document_id,
         })
         chunk.metadata = metadata
     batch_size = max(1, settings.INDEX_BATCH_SIZE)
@@ -528,6 +542,7 @@ def ingest_single_pdf(file_path: str, embedding_service, qdrant_service, folder:
     _embed_and_upsert_in_batches(chunks, embedding_service, qdrant_service, path_meta=path_meta)
 
     filename = os.path.basename(file_path)
+    document_id = qdrant_service.get_document_id(filename) or ""
     toc_records = [
         {
             "level": entry.level,
@@ -535,6 +550,7 @@ def ingest_single_pdf(file_path: str, embedding_service, qdrant_service, folder:
             "page_start": entry.page_start,
             "page_end": entry.page_end,
             "filename": filename,
+            "document_id": document_id,
             "canonical_name": canonical_display_name(filename),
         }
         for entry in parser.toc_map.get(filename, [])
@@ -1256,6 +1272,7 @@ class TranscriptSummary(BaseModel):
 class VideoStoryRequest(BaseModel):
     learning_objectives: Optional[str] = ""
     name: Optional[str] = None
+    hint: Optional[str] = None
 
 
 class VideoStoryResponse(BaseModel):
@@ -1470,6 +1487,52 @@ def summarize_document(filename: str):
     questions = generate_suggested_questions(summary_llm, summary, resolved)
     _summary_cache[resolved] = {"summary": summary, "questions": questions}
     return SummarizeResponse(filename=resolved, summary=summary, questions=questions)
+
+
+def migrate_document_ids(qdrant_service) -> dict:
+    """One-time migration: assign a permanent UUIDv7 document_id to every
+    already-indexed document that doesn't have one yet.
+
+    Idempotent -- documents that already carry a document_id (from a
+    previous run of this migration, or because they were ingested after
+    the UUIDv7 feature existed) are left untouched and reported separately.
+    Only the `document_id` payload field is written; text, vectors, and
+    every other piece of metadata are left exactly as they were.
+    """
+    migrated = []
+    already_had_id = []
+    for filename in qdrant_service.list_all_filenames():
+        existing = qdrant_service.get_document_id(filename)
+        if existing:
+            already_had_id.append({"filename": filename, "document_id": existing})
+            continue
+        document_id = uuid7_str()
+        points_updated = qdrant_service.set_document_id_for_filename(filename, document_id)
+        migrated.append({
+            "filename": filename,
+            "document_id": document_id,
+            "points_updated": points_updated,
+        })
+    return {
+        "migrated_count": len(migrated),
+        "already_had_id_count": len(already_had_id),
+        "migrated": migrated,
+        "already_had_id": already_had_id,
+    }
+
+
+@app.post("/api/admin/migrate-document-ids")
+def migrate_document_ids_endpoint():
+    """Explicit, user-triggered one-time migration -- assigns a permanent
+    UUIDv7 document_id to every already-indexed document that doesn't have
+    one yet. Safe to call more than once; already-migrated documents are
+    skipped and reported under `already_had_id` rather than re-processed.
+    """
+    qdrant_service = get_qdrant_service()
+    try:
+        return migrate_document_ids(qdrant_service)
+    except Exception as exc:
+        raise HTTPException(500, f"Document ID migration failed: {exc}")
 
 
 @app.delete("/api/documents/{filename}")
@@ -1688,7 +1751,7 @@ def generate_video_story(req: VideoStoryRequest):
 
     try:
         video_script, story, seed_character_name = presentation_llm.generate_video_and_story(
-            req.learning_objectives or "", all_chunks
+            req.learning_objectives or "", all_chunks, scenario_hint=req.hint
         )
     except Exception as exc:
         raise HTTPException(500, f"Something went wrong while generating the video script and story: {exc}")
@@ -1795,10 +1858,12 @@ def chat(req: ChatRequest):
 
             tied = ambiguous_candidates(question, docs)
             if tied:
+                display_names = [canonical_display_name(f) for f in tied]
+                listed = "\n".join(f"- {name}" for name in sorted(display_names))
                 return ChatResponse(
                     answer=(
                         "More than one document matches that request. "
-                        "Please rephrase with more detail about the topic or folder."
+                        "Which one did you mean?\n\n" + listed
                     ),
                     type="info",
                 )
