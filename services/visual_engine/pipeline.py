@@ -180,8 +180,9 @@ class UniversalVisualContentEngine:
                 f"Target Domain: {intent.domain}\n"
                 f"Communication Purpose: {intent.communication_purpose}\n"
                 f"Retrieved Context: {retrieved_context}\n\n"
-                f"Write a realistic 100-180 word scenario. "
-                f"Make sure to naturally incorporate one or more Human Performance Tools (such as Rate Your State (RYS), Anticipating Error, Close Calls, Habit Reminder, or RYS Supervisor Conversation)."
+                f"Write a dramatic 100-180 word scenario story in third-person narrative format with named specific character(s) (e.g. Alex, Marcus, Maria). "
+                f"Describe vivid physical actions, environmental conditions, and clear human interactions. "
+                f"Naturally incorporate one or more Human Performance Tools (such as Rate Your State (RYS), Anticipating Error, Close Calls, Habit Reminder, or RYS Supervisor Conversation)."
             )
 
             raw_text = self.llm_service._call_llm(

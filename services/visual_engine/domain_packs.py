@@ -14,13 +14,30 @@ class WarehouseSafetyDomain(BaseDomainPack):
 
     def enhance_scene_graph(self, scene_graph: SceneGraph) -> SceneGraph:
         # Guarantee safety gear and industrial props exist on relevant nodes
+        has_subject = False
         for node in scene_graph.nodes:
             if node.node_type == "subject":
+                has_subject = True
                 node.attributes.setdefault("clothing", "high-visibility safety vest, work trousers, steel-toe boots")
                 node.attributes.setdefault("headwear", "hard hat / safety helmet")
             elif node.node_type == "object":
                 if "rack" in node.name.lower() or "pallet" in node.name.lower():
                     node.attributes.setdefault("material", "heavy-duty industrial steel")
+
+        if not has_subject:
+            # Inject a prominent foreground subject worker so FLUX never generates an empty scene
+            scene_graph.nodes.insert(0, SceneNode(
+                id="worker_1",
+                name="Alex (warehouse technician)",
+                node_type="subject",
+                spatial_zone="foreground center-right",
+                attributes={
+                    "clothing": "yellow high-visibility safety vest, dark work trousers, steel-toe boots",
+                    "action": "taking a brief Rate Your State (RYS) pause, holding a clipboard and assessing heat fatigue",
+                    "emotion": "focused, mindful, sweating slightly from physical exertion",
+                    "headwear": "hard hat / safety helmet"
+                }
+            ))
         return scene_graph
 
     def get_camera_preset(self) -> CameraSpec:
