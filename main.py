@@ -63,6 +63,7 @@ from services.document_resolver import (
 from services.canonical_naming import canonical_display_name, current_month_folder, parse_canonical, unique_id_for
 from services import name_mapping
 from services.image_generation_service import HuggingFaceFluxService, PollinationsImageService, NovaCanvasService, FreepikImageService
+from services.visual_engine import UniversalVisualContentEngine, VisualEngineOutput
 
 logger = logging.getLogger(__name__)
 
@@ -2160,6 +2161,49 @@ def daily_tip(req: DailyTipRequest):
         word_counts=[len(t.split()) for t in tips],
         saved_paths=saved_paths,
     )
+
+
+class VisualEngineRequest(BaseModel):
+    user_request: str
+    domain_override: Optional[str] = None
+    style_override: Optional[str] = None
+    aspect_ratio: Optional[str] = "16:9"
+    generate_image: Optional[bool] = False
+
+
+@lru_cache(maxsize=1)
+def get_visual_engine() -> UniversalVisualContentEngine:
+    llm = get_qa_llm()
+    retriever = get_retriever()
+    try:
+        image_service = get_image_gen_service()
+    except Exception:
+        image_service = None
+    return UniversalVisualContentEngine(
+        llm_service=llm,
+        retriever_service=retriever,
+        image_service=image_service
+    )
+
+
+@app.post("/api/v1/visual-engine/generate", response_model=VisualEngineOutput)
+def generate_visual_content(req: VisualEngineRequest):
+    """Universal AI Visual Content Engine endpoint.
+    Generates both text content and a strictly aligned AI image prompt/image derived from the content.
+    """
+    engine = get_visual_engine()
+    try:
+        result = engine.generate_content_and_visual(
+            user_request=req.user_request,
+            domain_override=req.domain_override,
+            style_override=req.style_override,
+            aspect_ratio=req.aspect_ratio or "16:9",
+            generate_image_bytes=req.generate_image if req.generate_image is not None else False
+        )
+        return result
+    except Exception as exc:
+        logger.error("Visual engine generation failed: %s", exc, exc_info=True)
+        raise HTTPException(500, f"Visual engine processing error: {str(exc)}")
 
 
 # ---------------------------------------------------------------------------
