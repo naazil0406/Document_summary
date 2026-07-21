@@ -249,7 +249,9 @@ def load_semantic_boundary_detection_system_prompt() -> str:
 
 
 def load_image_prompt_system_prompt() -> str:
-    return _load_prompt_template(_IMAGE_PROMPT_SYSTEM_PROMPT_PATH)
+    if os.path.exists(_IMAGE_PROMPT_SYSTEM_PROMPT_PATH):
+        return _load_prompt_template(_IMAGE_PROMPT_SYSTEM_PROMPT_PATH)
+    return "You are a professional visual scene director. Synthesize a detailed, highly specific photorealistic image prompt based on the content context."
 
 
 def load_content_generation_system_prompt() -> str:
