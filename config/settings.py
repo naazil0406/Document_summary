@@ -160,6 +160,15 @@ class Settings:
     #     Bedrock model access; kept as an opt-in alternative.
     IMAGE_PROVIDER: str = os.getenv("IMAGE_PROVIDER", "huggingface")
 
+    # POC MODE: the Universal Visual Content Engine (services/visual_engine/ --
+    # Content Analysis Engine, Scene Graph, Prompt Compiler, etc.) is
+    # temporarily disabled. The learning-content feed and the
+    # /api/v1/visual-engine/generate endpoint both use the original,
+    # simpler pipeline instead (LLM generates content -> LLM generates
+    # image prompt from that content -> image model renders it). Flip
+    # this back to "true" to re-enable the advanced architecture later.
+    ENABLE_VISUAL_ENGINE: bool = os.getenv("ENABLE_VISUAL_ENGINE", "false").lower() == "true"
+
     # --- Separate AWS account for the image pipeline (Nova Lite prompt step +
     # Nova Canvas render step), used only when IMAGE_PROVIDER == "aws". Falls
     # back to the main AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/BEDROCK_REGION

@@ -1475,6 +1475,33 @@ button { font-family: inherit; cursor: pointer; }
     });
   }
 
+  async function refreshContentList() {
+    try {
+      const data = await api("/api/learning-content");
+      const items = data.learning_content || [];
+      if (items.length) {
+        generatedContent.length = 0;
+        items.forEach((item) => {
+          generatedContent.push({
+            id: item.id,
+            contentType: item.content_type,
+            topic: item.topic,
+            contentText: item.content_text,
+            imagePrompt: item.image_prompt,
+            imageBase64: item.image_base64,
+            createdAt: item.created_at,
+          });
+        });
+        renderContentList();
+        if (generatedContent.length > 0 && !activeContentId) {
+          renderContent(generatedContent[generatedContent.length - 1]);
+        }
+      }
+    } catch (exc) {
+      console.warn("Could not load saved learning content list:", exc);
+    }
+  }
+
   document.getElementById("contentPromptToggle").addEventListener("click", () => {
     const promptEl = document.getElementById("contentPromptText");
     const toggle = document.getElementById("contentPromptToggle");
@@ -1500,13 +1527,13 @@ button { font-family: inherit; cursor: pointer; }
         body: JSON.stringify({ content_type: contentType, topic }),
       });
       const entry = {
-        id: `${Date.now()}`,
+        id: result.id || `${Date.now()}`,
         contentType: result.content_type,
         topic: result.topic,
         contentText: result.content_text,
         imagePrompt: result.image_prompt,
         imageBase64: result.image_base64,
-        createdAt: new Date().toISOString(),
+        createdAt: result.created_at || new Date().toISOString(),
       };
       generatedContent.push(entry);
       renderContentList();
@@ -1521,6 +1548,7 @@ button { font-family: inherit; cursor: pointer; }
   });
 
   renderContentList();
+  refreshContentList();
   refreshContentTypes();
 
   // ---- Init ----

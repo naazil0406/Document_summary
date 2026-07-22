@@ -63,6 +63,7 @@ from services.document_resolver import (
 from services.canonical_naming import canonical_display_name, current_month_folder, parse_canonical, unique_id_for
 from services import name_mapping
 from services.image_generation_service import HuggingFaceFluxService, PollinationsImageService, NovaCanvasService, FreepikImageService
+from services.visual_engine import UniversalVisualContentEngine, VisualEngineOutput
 
 logger = logging.getLogger(__name__)
 
@@ -1182,64 +1183,185 @@ def generate_learning_feed_item(
             f"Supported types: {', '.join(CONTENT_TYPES)}"
         )
 
+    # --- POC MODE ---
+    # The Universal Visual Content Engine (services/visual_engine/ --
+    # Content Analysis Engine, Scene Graph, Prompt Compiler, Consistency
+    # Validator) is temporarily disabled. Use the original, simpler
+    # pipeline instead: the LLM generates the learner content, then a
+    # second LLM call turns that generated content into the image prompt.
+    # No new architecture is introduced here; see
+    # services/llm_service.py's generate_image_prompt_package() and
+    # prompts/image_prompt_system.txt. Set settings.ENABLE_VISUAL_ENGINE=true
+    # to go back to the engine later.
     try:
         chunks = retriever.retrieve(topic, folders=folders)
     except Exception as exc:
         logger.error("Retrieval failed during content generation: %s", exc)
         raise RuntimeError("An error occurred while retrieving relevant information.") from exc
 
-    if not chunks:
-        raise ValueError(
-            f"No relevant context was found in the indexed documents for topic: {topic}. "
-            "Upload and process the relevant document first."
-        )
-
-    # Look up everything previously generated for this exact
-    # (content_type, topic) pair (across past requests, not just this
-    # batch) so repeat calls — e.g. clicking "regenerate" on the same
-    # topic — pick a different fact/angle/phrasing instead of converging
-    # on the same wording each time.
-    history_key = _content_history_key(content_type, topic)
-    avoid_repeating = _load_content_history(history_key)
-
     content_text = content_llm.generate_learning_content(
-        content_type,
-        topic,
-        chunks,
+        content_type=content_type,
+        topic=topic,
+        chunks=chunks,
         monthly_topic_content=monthly_topic_content,
         common_data=common_data,
         web_results=web_results,
-        avoid_repeating=avoid_repeating or None,
     )
 
-    # Persist this generation both as a standalone local file and into the
-    # history used to steer future generations for this same pair away
-    # from repeating it.
+    image_b64 = ""
+    image_prompt = ""
+    alt_text = ""
+    tags: List[str] = []
+    summary = ""
+    if image_gen_service:
+        mode = _image_mode_for_content_type(content_type)
+        image_package = image_prompt_llm.generate_image_prompt_package(
+            content_type=content_type,
+            topic=topic,
+            generated_content=content_text,
+            chunks=chunks,
+            mode=mode,
+        )
+        image_prompt = image_package["image_prompt"]
+        negative_prompt = image_package["negative_prompt"] or _negative_prompt_for_mode(mode)
+        alt_text = image_package["alt_text"]
+        tags = image_package["tags"]
+        summary = image_package["summary"]
+
+        try:
+            image_bytes = image_gen_service.generate_image(image_prompt, negative_prompt=negative_prompt)
+            image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+        except Exception as exc:
+            logger.warning(f"Image generation failed, continuing with content only: {exc}")
+
+    # Save content text to disk
     content_saved_path = save_generated_content(content_text, content_type, topic)
+    history_key = _content_history_key(content_type, topic)
     _append_content_history(history_key, content_text)
 
-    # The Image Prompt Generation Agent (Nova Lite) is driven by what the
-    # content actually says, not just the bare topic, so the image matches
-    # the specific fact/scenario/question generated above. Which visual
-    # strategy it uses (photorealistic scene vs. flat-vector infographic)
-    # is chosen explicitly by content_type, not inferred from wording.
-    image_mode = _image_mode_for_content_type(content_type)
-    image_query = f"{content_type} about \"{topic}\": {content_text}"
-    image_prompt = image_prompt_llm.generate_image_prompt(image_query, chunks, mode=image_mode)
+    # Save image to disk if base64 bytes exist
+    saved_path = ""
+    if image_b64:
+        try:
+            img_bytes = base64.b64decode(image_b64)
+            saved_path = save_generated_image(img_bytes, label=f"{content_type}_{topic[:30]}")
+        except Exception as exc:
+            logger.warning(f"Could not save generated image to disk: {exc}")
 
-    negative_prompt = _negative_prompt_for_mode(image_mode)
-    image_bytes = image_gen_service.generate_image(image_prompt, negative_prompt=negative_prompt)
-    saved_path = save_generated_image(image_bytes, label=f"{content_type}_{topic[:30]}")
+    # Write sidecar JSON metadata for persistence across restarts
+    item_id = os.path.basename(content_saved_path).replace(".txt", "")
+    json_path = os.path.join(settings.GENERATED_CONTENT_DIR, f"{item_id}.json")
+    created_at = datetime.now().isoformat()
+    meta = {
+        "id": item_id,
+        "content_type": content_type,
+        "topic": topic,
+        "content_text": content_text,
+        "image_prompt": image_prompt,
+        "image_saved_path": saved_path,
+        "summary": summary,
+        "alt_text": alt_text,
+        "tags": tags,
+        "created_at": created_at,
+    }
+    try:
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2, ensure_ascii=False)
+    except Exception as exc:
+        logger.warning(f"Could not save sidecar metadata for {item_id}: {exc}")
 
     return {
+        "id": item_id,
         "content_type": content_type,
         "topic": topic,
         "content_text": content_text,
         "content_saved_path": content_saved_path,
         "image_prompt": image_prompt,
-        "image_base64": base64.b64encode(image_bytes).decode("utf-8"),
+        "image_base64": image_b64,
         "saved_path": saved_path,
+        "summary": summary,
+        "alt_text": alt_text,
+        "tags": tags,
+        "created_at": created_at,
     }
+
+
+def _list_saved_learning_content() -> List[dict]:
+    """Every generated learning content item saved on disk, oldest first."""
+    folder = settings.GENERATED_CONTENT_DIR
+    if not os.path.isdir(folder):
+        return []
+
+    entries = []
+    for filename in os.listdir(folder):
+        if filename.endswith(".json") and not filename.startswith("_"):
+            path = os.path.join(folder, filename)
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                img_b64 = ""
+                img_path = meta.get("image_saved_path", "")
+                if img_path and os.path.isfile(img_path):
+                    with open(img_path, "rb") as img_f:
+                        img_b64 = base64.b64encode(img_f.read()).decode("utf-8")
+                entries.append({
+                    "id": meta.get("id", filename[:-5]),
+                    "content_type": meta.get("content_type", "Scenario"),
+                    "topic": meta.get("topic", "Learning Content"),
+                    "content_text": meta.get("content_text", ""),
+                    "image_prompt": meta.get("image_prompt", ""),
+                    "image_base64": img_b64,
+                    "created_at": meta.get("created_at", datetime.fromtimestamp(os.path.getmtime(path)).isoformat()),
+                })
+            except Exception:
+                continue
+        elif filename.endswith(".txt") and not filename.startswith("_"):
+            txt_path = os.path.join(folder, filename)
+            json_counterpart = txt_path.replace(".txt", ".json")
+            if os.path.exists(json_counterpart):
+                continue
+            try:
+                with open(txt_path, "r", encoding="utf-8") as f:
+                    text_content = f.read()
+                parts = filename.replace("generated_", "").replace(".txt", "").split("_")
+                c_type = parts[0] if parts else "Scenario"
+                topic_str = " ".join(parts[1:-2]) if len(parts) > 3 else "Learning Content"
+                timestamp_str = parts[-2] + "_" + parts[-1] if len(parts) >= 2 else ""
+
+                # Find specific matching image by timestamp or topic in Generated_images
+                img_b64 = ""
+                if os.path.isdir(settings.GENERATED_IMAGES_DIR):
+                    matching_img_file = None
+                    for img_file in os.listdir(settings.GENERATED_IMAGES_DIR):
+                        if img_file.endswith(".png"):
+                            if timestamp_str and timestamp_str in img_file:
+                                matching_img_file = img_file
+                                break
+                            elif topic_str.lower() in img_file.lower():
+                                matching_img_file = img_file
+
+                    if matching_img_file:
+                        full_img = os.path.join(settings.GENERATED_IMAGES_DIR, matching_img_file)
+                        try:
+                            with open(full_img, "rb") as img_f:
+                                img_b64 = base64.b64encode(img_f.read()).decode("utf-8")
+                        except Exception:
+                            pass
+
+                entries.append({
+                    "id": filename.replace(".txt", ""),
+                    "content_type": c_type,
+                    "topic": topic_str or "Learning Content",
+                    "content_text": text_content,
+                    "image_prompt": "Universal Visual Engine Scene Graph Prompt",
+                    "image_base64": img_b64,
+                    "created_at": datetime.fromtimestamp(os.path.getmtime(txt_path)).isoformat(),
+                })
+            except Exception:
+                continue
+
+    entries.sort(key=lambda e: e["created_at"])
+    return entries
 
 
 def summarize_indexed_document(name: str, qdrant_service, summary_llm) -> str:
@@ -1431,6 +1553,9 @@ class ContentGenResponse(BaseModel):
     image_prompt: str
     image_base64: str
     saved_path: str
+    summary: str = ""
+    alt_text: str = ""
+    tags: List[str] = []
 
 
 class DailyTipRequest(BaseModel):
@@ -1461,6 +1586,22 @@ def on_startup():
     os.makedirs(settings.PDF_FOLDER, exist_ok=True)
     _migrate_legacy_script_filenames()
 
+    if settings.ENABLE_VISUAL_ENGINE:
+        logger.warning(
+            "VISUAL ENGINE MODE: ENABLE_VISUAL_ENGINE=true — "
+            "generate_learning_feed_item() and /api/v1/visual-engine/generate "
+            "are using services/visual_engine/ (Content Analysis Engine / "
+            "Scene Graph / Prompt Compiler)."
+        )
+    else:
+        logger.warning(
+            "POC MODE: ENABLE_VISUAL_ENGINE=false — services/visual_engine/ "
+            "is disabled. generate_learning_feed_item() uses the original "
+            "pipeline (generate_learning_content -> generate_image_prompt_package "
+            "-> image_gen_service.generate_image). /api/v1/visual-engine/generate "
+            "will return 501."
+        )
+
 
 @app.get("/api/status")
 def status():
@@ -1476,6 +1617,12 @@ def status():
             bool(settings.AWS_ACCESS_KEY_ID and settings.AWS_SECRET_ACCESS_KEY)
             if settings.LLM_PROVIDER == "bedrock"
             else bool(settings.OPENROUTER_API_KEY)
+        ),
+        "visual_engine_enabled": settings.ENABLE_VISUAL_ENGINE,
+        "content_image_pipeline": (
+            "visual_engine (Content Analysis Engine / Scene Graph / Prompt Compiler)"
+            if settings.ENABLE_VISUAL_ENGINE
+            else "poc (generate_learning_content -> generate_image_prompt_package)"
         ),
     }
 
@@ -2084,6 +2231,12 @@ def generate_content(req: ContentGenRequest):
     return ContentGenResponse(**result)
 
 
+@app.get("/api/learning-content")
+def list_learning_content():
+    """Returns all saved learning content items from disk for the UI rail."""
+    return {"learning_content": _list_saved_learning_content()}
+
+
 @app.get("/api/folders")
 def list_folders():
     """Every folder currently indexed in Qdrant (e.g. "video_scripts",
@@ -2160,6 +2313,71 @@ def daily_tip(req: DailyTipRequest):
         word_counts=[len(t.split()) for t in tips],
         saved_paths=saved_paths,
     )
+
+
+class VisualEngineRequest(BaseModel):
+    user_request: str
+    domain_override: Optional[str] = None
+    style_override: Optional[str] = None
+    aspect_ratio: Optional[str] = "16:9"
+    generate_image: Optional[bool] = False
+
+
+@lru_cache(maxsize=1)
+def get_visual_engine() -> UniversalVisualContentEngine:
+    """Construct the Universal Visual Content Engine — but only if
+    explicitly re-enabled via settings.ENABLE_VISUAL_ENGINE. This check
+    lives here (not just on the one endpoint below) so services/visual_engine/
+    cannot run from ANY call site — current or future — while POC mode is
+    on, even if someone adds a new caller for it later.
+    """
+    if not settings.ENABLE_VISUAL_ENGINE:
+        raise RuntimeError(
+            "services/visual_engine/ (Content Analysis Engine / Scene Graph / "
+            "Prompt Compiler) is disabled in POC mode. Set "
+            "ENABLE_VISUAL_ENGINE=true to re-enable it."
+        )
+    llm = get_qa_llm()
+    retriever = get_retriever()
+    try:
+        image_service = get_image_gen_service()
+    except Exception:
+        image_service = None
+    return UniversalVisualContentEngine(
+        llm_service=llm,
+        retriever_service=retriever,
+        image_service=image_service
+    )
+
+
+@app.post("/api/v1/visual-engine/generate", response_model=VisualEngineOutput)
+def generate_visual_content(req: VisualEngineRequest):
+    """Universal AI Visual Content Engine endpoint.
+    Generates both text content and a strictly aligned AI image prompt/image derived from the content.
+
+    POC MODE: disabled by default. The learning-content feed
+    (generate_learning_feed_item) no longer calls this engine; it uses the
+    original simpler pipeline instead (see generate_image_prompt_package()).
+    Set ENABLE_VISUAL_ENGINE=true to re-enable this endpoint.
+    """
+    if not settings.ENABLE_VISUAL_ENGINE:
+        raise HTTPException(
+            501,
+            "The Visual Engine is disabled in POC mode. Set ENABLE_VISUAL_ENGINE=true to re-enable it.",
+        )
+    engine = get_visual_engine()
+    try:
+        result = engine.generate_content_and_visual(
+            user_request=req.user_request,
+            domain_override=req.domain_override,
+            style_override=req.style_override,
+            aspect_ratio=req.aspect_ratio or "16:9",
+            generate_image_bytes=req.generate_image if req.generate_image is not None else False
+        )
+        return result
+    except Exception as exc:
+        logger.error("Visual engine generation failed: %s", exc, exc_info=True)
+        raise HTTPException(500, f"Visual engine processing error: {str(exc)}")
 
 
 # ---------------------------------------------------------------------------

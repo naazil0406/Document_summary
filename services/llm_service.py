@@ -249,7 +249,9 @@ def load_semantic_boundary_detection_system_prompt() -> str:
 
 
 def load_image_prompt_system_prompt() -> str:
-    return _load_prompt_template(_IMAGE_PROMPT_SYSTEM_PROMPT_PATH)
+    if os.path.exists(_IMAGE_PROMPT_SYSTEM_PROMPT_PATH):
+        return _load_prompt_template(_IMAGE_PROMPT_SYSTEM_PROMPT_PATH)
+    return "You are a professional visual scene director. Synthesize a detailed, highly specific photorealistic image prompt based on the content context."
 
 
 def load_content_generation_system_prompt() -> str:
@@ -612,6 +614,68 @@ class BaseLLMService:
         if not image_prompt:
             raise RuntimeError("Nova Lite returned an empty image prompt.")
         return image_prompt
+
+    def generate_image_prompt_package(
+        self,
+        content_type: str,
+        topic: str,
+        generated_content: str,
+        chunks: List[dict],
+        mode: str = "infographic",
+    ) -> dict:
+        """POC-mode image step: ONE LLM call that turns the already-generated
+        learner content into an expert-level image prompt + negative_prompt +
+        alt_text + tags + summary, per prompts/image_prompt_system.txt.
+
+        This is the direct replacement for services/visual_engine/'s
+        Content Analysis Engine -> Scene Graph -> Prompt Compiler chain in
+        the learning-content feed (see main.py's generate_learning_feed_item).
+        That engine is disabled; this is the "original pipeline" path,
+        just with a richer prompt than the plain generate_image_prompt()
+        above (which the standalone /api/v1/generate-image endpoint still
+        uses unchanged).
+
+        The image prompt is always derived from generated_content (the
+        single source of truth), never the raw topic alone.
+        """
+        if mode not in ("infographic", "scene"):
+            mode = "infographic"
+
+        system_prompt = load_image_prompt_system_prompt()
+        retrieved_chunks = format_context(chunks)
+        user_prompt = (
+            f"Output Mode: {mode}\n\n"
+            f"Content Type: {content_type}\n"
+            f"Topic: {topic}\n\n"
+            f"Generated Content:\n{generated_content}\n\n"
+            f"Retrieved Context:\n{retrieved_chunks}"
+        )
+        raw = self._call_llm(system_prompt, user_prompt).strip()
+
+        if raw.startswith("```"):
+            raw = re.sub(r"^```(?:\w+)?\s*", "", raw)
+            raw = re.sub(r"\s*```$", "", raw)
+        raw = raw.strip()
+
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"Image prompt generation did not return valid JSON: {exc}\n"
+                f"Raw response: {raw[:500]}"
+            ) from exc
+
+        image_prompt = (data.get("image_prompt") or "").strip()
+        if not image_prompt:
+            raise RuntimeError("Image prompt generation returned an empty image_prompt.")
+
+        return {
+            "image_prompt": image_prompt,
+            "negative_prompt": (data.get("negative_prompt") or "").strip(),
+            "alt_text": (data.get("alt_text") or "").strip(),
+            "tags": data.get("tags") or [],
+            "summary": (data.get("summary") or "").strip(),
+        }
 
     def generate_learning_content(
         self,

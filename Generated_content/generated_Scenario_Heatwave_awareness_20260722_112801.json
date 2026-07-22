@@ -1,0 +1,18 @@
+{
+  "id": "generated_Scenario_Heatwave_awareness_20260722_112801",
+  "content_type": "Scenario",
+  "topic": "Heatwave awareness",
+  "content_text": "It's a scorching afternoon, and you're on the floor managing a critical installation. The heat is intense, and you can feel your energy dipping with every passing hour. You’re trying to stay focused, but the clock on the wall keeps drawing your eye—you’re eager to wrap up and head home before it gets even hotter. As you work, a small misalignment catches your attention. You know it needs immediate correction to avoid future issues, but the heat is making you impatient. Instead of double-checking your work, you decide to power through quickly, telling yourself you’ll fix it later. \n\nWhat happens next? The rushed decision leads to a near miss when a component shifts unexpectedly, narrowly avoiding a dangerous pinch point. This moment highlights how heat doesn’t just affect your comfort—it can cloud judgment and push you toward shortcuts that compromise safety. Recognizing the early signs of heat stress and taking proactive breaks can help keep focus sharp and prevent small oversights from turning into serious incidents.",
+  "image_prompt": "photorealistic documentary photograph of a warehouse aisle on a scorching afternoon. A lone worker, dressed in light-colored work clothes and a hard hat, is hunched over a critical installation, beads of sweat visible on their forehead. The heat is intense, and the air is thick. The worker's posture is slightly slouched, and their hands are gripping a tool tightly, showing signs of strain. A small misalignment in the installation catches the worker's attention, but they decide to power through quickly, not double-checking their work. The moment is caught just as a component shifts unexpectedly, narrowly avoiding a dangerous pinch point. The warehouse is dimly lit with overhead fluorescent lights, and the shadows are long and sharp. The mood is tense and urgent, highlighting the risks of heat affecting judgment and safety.",
+  "image_saved_path": "Generated_images\\generated_Scenario_Heatwave_awareness_20260722_112801.png",
+  "summary": "This image depicts a worker in a warehouse on a hot day, narrowly avoiding a dangerous situation due to heat stress, aligning with the purpose of the Scenario Content Type to apply knowledge to a realistic situation.",
+  "alt_text": "A worker in a warehouse on a hot day, narrowly avoiding a dangerous situation due to heat stress.",
+  "tags": [
+    "heatwave",
+    "safety",
+    "warehouse",
+    "installation",
+    "heat stress"
+  ],
+  "created_at": "2026-07-22T11:28:01.813035"
+}
