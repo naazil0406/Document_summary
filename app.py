@@ -274,6 +274,25 @@ def parse_and_chunk(
             )
             for p in pages
         ]
+    elif parser and parser.__class__.__name__ == "JSONParser":
+        # JSONParser already performs record-boundary-aware chunking at
+        # extraction time (see services/json_parser.py). Pass its pages
+        # straight through as final chunks instead of re-chunking with the
+        # prose-oriented DocumentChunker/SemanticChunker.
+        chunks = [
+            Chunk(
+                chunk_id=str(uuid.uuid4()),
+                text=p.text,
+                filename=p.filename,
+                page_number=p.page_number,
+                page_label=p.page_label,
+                page_start=p.page_number,
+                page_end=p.page_number,
+                metadata=dict(p.metadata or {}),
+                toc_section=(p.metadata or {}).get("toc_section", ""),
+            )
+            for p in pages
+        ]
     elif not use_semantic_chunking:
         chunks = chunk_pages_legacy(pages, embedding_service, **chunk_kwargs)
     elif settings.USE_SEMANTIC_BOUNDARY_DETECTION:

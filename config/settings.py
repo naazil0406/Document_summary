@@ -49,6 +49,11 @@ class Settings:
     # --- Document Chunking (Stage 1: headings / sections / paragraphs) ---
     DOC_CHUNK_HEADING_MAX_LENGTH: int = int(os.getenv("DOC_CHUNK_HEADING_MAX_LENGTH", "80"))
     DOC_CHUNK_MIN_PARAGRAPH_LENGTH: int = int(os.getenv("DOC_CHUNK_MIN_PARAGRAPH_LENGTH", "20"))
+
+    # --- JSON Chunking (record-boundary-aware; see services/json_parser.py) ---
+    # JSON has no headings/blank-line paragraphs for DocumentChunker to split on,
+    # so it gets its own size cap instead of reusing MAX_CHUNK_SIZE.
+    JSON_CHUNK_MAX_CHARS: int = int(os.getenv("JSON_CHUNK_MAX_CHARS", "1500"))
     USE_SEMANTIC_BOUNDARY_DETECTION: bool = os.getenv(
         "USE_SEMANTIC_BOUNDARY_DETECTION", "true"
     ).strip().lower() in ("1", "true", "yes", "on")

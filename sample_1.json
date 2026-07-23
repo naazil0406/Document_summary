@@ -1,0 +1,103 @@
+{
+  "company": "TechNova Solutions",
+  "founded": 2015,
+  "is_public": false,
+  "headquarters": {
+    "street": "45 Anna Salai",
+    "city": "Chennai",
+    "state": "Tamil Nadu",
+    "country": "India",
+    "zip": "600002",
+    "coordinates": {
+      "lat": 13.0827,
+      "lng": 80.2707
+    }
+  },
+  "departments": [
+    {
+      "name": "Engineering",
+      "head": "Priya Ramesh",
+      "employees": [
+        {
+          "id": 101,
+          "name": "Arjun Kumar",
+          "role": "Backend Developer",
+          "skills": ["Python", "Django", "PostgreSQL"],
+          "active": true,
+          "manager": "Priya Ramesh"
+        },
+        {
+          "id": 102,
+          "name": "Sneha Iyer",
+          "role": "Frontend Developer",
+          "skills": ["React", "TypeScript"],
+          "active": true,
+          "manager": "Priya Ramesh"
+        }
+      ],
+      "budget": 500000.75,
+      "sub_teams": {
+        "backend": ["Arjun Kumar"],
+        "frontend": ["Sneha Iyer"],
+        "devops": []
+      }
+    },
+    {
+      "name": "Marketing",
+      "head": "Vikram Singh",
+      "employees": [
+        {
+          "id": 201,
+          "name": "Divya Menon",
+          "role": "Content Strategist",
+          "skills": ["SEO", "Copywriting"],
+          "active": false,
+          "manager": "Vikram Singh"
+        }
+      ],
+      "budget": 150000,
+      "sub_teams": {}
+    }
+  ],
+  "products": [
+    {
+      "name": "NovaCRM",
+      "version": "3.2.1",
+      "release_date": "2024-06-15",
+      "features": ["Lead tracking", "Email automation", "Analytics dashboard"],
+      "pricing_tiers": [
+        {"tier": "Basic", "price": 29.99, "users": 5},
+        {"tier": "Pro", "price": 79.99, "users": 20},
+        {"tier": "Enterprise", "price": null, "users": "unlimited"}
+      ]
+    },
+    {
+      "name": "NovaChat",
+      "version": "1.0.0-beta",
+      "release_date": null,
+      "features": [],
+      "pricing_tiers": []
+    }
+  ],
+  "matrix_example": [
+    [1, 2, 3],
+    [4, 5, 6],
+    [7, 8, 9]
+  ],
+  "tags": ["saas", "b2b", "cloud", "ai-powered"],
+  "metadata": {
+    "last_updated": "2026-07-20T10:30:00Z",
+    "version_history": [
+      {"version": "1.0", "date": "2015-01-10"},
+      {"version": "2.0", "date": "2019-05-22"},
+      {"version": "3.0", "date": "2023-11-08"}
+    ],
+    "empty_notes": {},
+    "flags": {
+      "beta_enabled": true,
+      "maintenance_mode": false,
+      "deprecated_features": null
+    }
+  },
+  "revenue_by_quarter": [1200000, 1350000, 1420000, 1580000]
+}
